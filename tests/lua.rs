@@ -65,3 +65,85 @@ packages(cfg)
     assert!(config.packages.list.contains(&"vim".to_string()));
     Ok(())
 }
+
+#[test]
+fn test_full_config_loading() -> Result<()> {
+    use rscm::config::loader::ConfigLoader;
+
+    let loader = ConfigLoader::new()?;
+    let config = loader.load("test_config.lua")?;
+
+    assert!(
+        !config.sources.is_empty(),
+        "sources section should not be empty"
+    );
+    assert!(
+        config.sources.contains_key("dotfiles"),
+        "should have dotfiles source"
+    );
+    assert!(
+        config.sources.contains_key("local_modules"),
+        "should have local_modules source"
+    );
+
+    assert!(config.system.is_some(), "system section should exist");
+    let system = config.system.as_ref().unwrap();
+    assert_eq!(system.hostname, Some("workstation".to_string()));
+
+    assert!(config.boot.is_some(), "boot section should exist");
+    let boot = config.boot.as_ref().unwrap();
+    assert!(boot.kernel.is_some(), "kernel config should exist");
+
+    assert!(
+        !config.packages.list.is_empty(),
+        "packages list should not be empty"
+    );
+
+    assert!(
+        config.programs.contains_key("git"),
+        "should have git program"
+    );
+
+    assert!(
+        config.hardware.graphics.is_some(),
+        "graphics config should exist"
+    );
+
+    assert!(config.security.sudo.is_some(), "sudo config should exist");
+
+    assert!(
+        config.filesystems.len() > 0,
+        "filesystems section should not be empty"
+    );
+
+    assert!(
+        !config.swapdevices.is_empty(),
+        "swapdevices should not be empty"
+    );
+
+    assert!(
+        config.environment.variables.is_some()
+            || config.environment.session_variables.is_some()
+            || config.environment.shell_init.is_some()
+            || config.environment.paths_to_link.is_some(),
+        "environment section should have at least one field"
+    );
+
+    assert!(
+        config.plugins.contains_key("docker"),
+        "should have docker plugin"
+    );
+
+    assert!(
+        config.systems.contains_key("workstation"),
+        "should have workstation system"
+    );
+    assert!(
+        config.systems.contains_key("devserver"),
+        "should have devserver system"
+    );
+
+    assert!(config.outputs.is_some(), "outputs section should exist");
+
+    Ok(())
+}

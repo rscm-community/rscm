@@ -1,24 +1,52 @@
 use crate::config::SourceConfig;
 use mlua::{Lua, Table, Value};
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 pub struct BuiltinState {
-    pub sources: HashMap<String, SourceConfig>,
-    pub source_data: HashMap<String, Table>,
+    pub sources: Mutex<HashMap<String, SourceConfig>>,
+    pub source_data: Mutex<HashMap<String, Table>>,
 }
 
 impl Default for BuiltinState {
     fn default() -> Self {
         Self {
-            sources: HashMap::new(),
-            source_data: HashMap::new(),
+            sources: Mutex::new(HashMap::new()),
+            source_data: Mutex::new(HashMap::new()),
         }
     }
 }
 
-pub fn register_builtins(lua: &Lua, _state: Arc<BuiltinState>) -> mlua::Result<()> {
+pub fn register_builtins(lua: &Lua, state: Arc<BuiltinState>) -> mlua::Result<()> {
     let globals = lua.globals();
+
+    let sources_fn = lua.create_function(move |_lua: &Lua, params: Table| {
+        let mut sources_map = state.sources.lock().unwrap();
+        for pair in params.pairs::<String, Table>() {
+            let (name, source_table) = pair?;
+            let mut config = SourceConfig::default();
+
+            if let Ok(source_type) = source_table.get::<String>("type") {
+                config.source_type = match source_type.as_str() {
+                    "github" => crate::config::SourceType::GitHub,
+                    "path" => crate::config::SourceType::Path,
+                    "directurl" => crate::config::SourceType::DirectUrl,
+                    _ => crate::config::SourceType::Path,
+                };
+            }
+            config.owner = source_table.get::<String>("owner").ok();
+            config.repo = source_table.get::<String>("repo").ok();
+            config.r#ref = source_table.get::<String>("ref").ok();
+            config.path = source_table.get::<String>("path").ok();
+            config.track_git = source_table.get::<bool>("track_git").ok();
+            config.url = source_table.get::<String>("url").ok();
+            config.hash = source_table.get::<String>("hash").ok();
+
+            sources_map.insert(name, config);
+        }
+        Ok(())
+    })?;
+    globals.set("sources", sources_fn)?;
 
     let extend_fn = lua.create_function(
         |lua: &Lua, args: mlua::Variadic<mlua::Value>| -> mlua::Result<Table> {
@@ -135,11 +163,27 @@ pub fn register_builtins(lua: &Lua, _state: Arc<BuiltinState>) -> mlua::Result<(
     })?;
     globals.set("path", path_block_fn)?;
 
-    let source_fn = lua.create_function(|_lua: &Lua, name: String| -> mlua::Result<Table> {
-        let table = _lua.create_table()?;
-        table.set("__source_name", name)?;
-        Ok(table)
-    })?;
+    let source_fn =
+        lua.create_function(move |_lua: &Lua, name: String| -> mlua::Result<Table> {
+            let table = _lua.create_table()?;
+            table.set("__source_name", name.clone())?;
+
+            let metatable = _lua.create_table()?;
+            let index_fn = _lua.create_function(
+                move |_lua2: &Lua, (src_table, key): (Table, String)| -> mlua::Result<Table> {
+                    let current_name: String = src_table
+                        .get("__source_name")
+                        .unwrap_or_else(|_| name.clone());
+                    let result = _lua2.create_table()?;
+                    result.set("__source_name", format!("{}.{}", current_name, key))?;
+                    Ok(result)
+                },
+            )?;
+            metatable.set("__index", index_fn)?;
+            let _ = table.set_metatable(Some(metatable));
+
+            Ok(table)
+        })?;
     globals.set("source", source_fn)?;
 
     Ok(())
