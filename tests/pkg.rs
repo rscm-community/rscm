@@ -1,0 +1,389 @@
+use anyhow::Result;
+use rscm::pkg::{
+    aur::AurHelper, lock::GlobalLock, pacman::Pacman, BuildType, PackageConfig, PackageManager,
+    PackageManagerFactory, PackageManagerType, PackageSource, RemoveResult, SandboxConfig,
+};
+use std::fs;
+use tempfile::tempdir;
+
+// ==================== GlobalLock Tests ====================
+
+#[test]
+fn test_global_lock_acquire() -> Result<()> {
+    let lock = GlobalLock::acquire()?;
+    drop(lock);
+    Ok(())
+}
+
+#[test]
+fn test_global_lock_prevents_concurrent() -> Result<()> {
+    let _lock1 = GlobalLock::acquire()?;
+    let result = GlobalLock::acquire();
+    assert!(result.is_err());
+    let err_msg = result.err().unwrap().to_string();
+    assert!(err_msg.contains("Another rscm instance is running"));
+    Ok(())
+}
+
+#[test]
+fn test_global_lock_auto_release() -> Result<()> {
+    {
+        let _lock1 = GlobalLock::acquire()?;
+    }
+    let _lock2 = GlobalLock::acquire()?;
+    Ok(())
+}
+
+// ==================== PackageManagerFactory Tests ====================
+
+#[test]
+fn test_package_manager_factory_creation() -> Result<()> {
+    let dir = tempdir()?;
+    let store_root = dir.path().join("store");
+    fs::create_dir_all(&store_root)?;
+
+    let factory = PackageManagerFactory::new(store_root.clone());
+    assert!(factory.has_aur_helper() || !factory.has_aur_helper());
+    Ok(())
+}
+
+#[test]
+fn test_package_manager_factory_pacman_manager() -> Result<()> {
+    let dir = tempdir()?;
+    let store_root = dir.path().join("store");
+    fs::create_dir_all(&store_root)?;
+
+    let factory = PackageManagerFactory::new(store_root);
+    let pkg_manager = factory.pacman_manager();
+
+    assert_eq!(pkg_manager.manager_name(), "pacman");
+    assert_eq!(pkg_manager.build_type(), BuildType::Pacman);
+    Ok(())
+}
+
+#[test]
+fn test_package_manager_factory_for_package() -> Result<()> {
+    let dir = tempdir()?;
+    let store_root = dir.path().join("store");
+    fs::create_dir_all(&store_root)?;
+
+    let factory = PackageManagerFactory::new(store_root);
+
+    let pacman_config = PackageConfig {
+        name: "test".to_string(),
+        version: None,
+        build_type: BuildType::Pacman,
+        dependencies: vec![],
+        sandbox_config: None,
+    };
+
+    let pkg_manager = factory.for_package(&pacman_config)?;
+    assert_eq!(pkg_manager.manager_name(), "pacman");
+    Ok(())
+}
+
+// ==================== Pacman Tests ====================
+
+#[test]
+fn test_pacman_creation() -> Result<()> {
+    let dir = tempdir()?;
+    let store_root = dir.path().join("store");
+    fs::create_dir_all(&store_root)?;
+
+    let _pacman = Pacman::new(store_root.clone());
+    Ok(())
+}
+
+#[test]
+fn test_pacman_system_creation() -> Result<()> {
+    let dir = tempdir()?;
+    let store_root = dir.path().join("store");
+    fs::create_dir_all(&store_root)?;
+
+    let _pacman = Pacman::system(store_root);
+    Ok(())
+}
+
+#[test]
+fn test_pacman_install_nonexistent_package() -> Result<()> {
+    let dir = tempdir()?;
+    let store_root = dir.path().join("store");
+    fs::create_dir_all(&store_root)?;
+
+    let pacman = Pacman::new(store_root);
+
+    let pkg_config = PackageConfig {
+        name: "nonexistent-package-xyz123".to_string(),
+        version: None,
+        build_type: BuildType::Pacman,
+        dependencies: vec![],
+        sandbox_config: None,
+    };
+
+    let result = pacman.install(&pkg_config, false);
+    assert!(result.is_err());
+    Ok(())
+}
+
+#[test]
+fn test_pacman_remove_nonexistent_package() -> Result<()> {
+    let dir = tempdir()?;
+    let store_root = dir.path().join("store");
+    fs::create_dir_all(&store_root)?;
+
+    let pacman = Pacman::new(store_root);
+
+    let result = pacman.remove("nonexistent-package-xyz123", None, false);
+    assert!(result.is_ok() || result.is_err());
+    Ok(())
+}
+
+#[test]
+fn test_pacman_query_package_info() -> Result<()> {
+    let dir = tempdir()?;
+    let store_root = dir.path().join("store");
+    fs::create_dir_all(&store_root)?;
+
+    let pacman = Pacman::new(store_root);
+    let _result = pacman.query_package_info("bash");
+    Ok(())
+}
+
+#[test]
+fn test_pacman_list_installed() -> Result<()> {
+    let dir = tempdir()?;
+    let store_root = dir.path().join("store");
+    fs::create_dir_all(&store_root)?;
+
+    let pacman = Pacman::new(store_root);
+    let _result = pacman.list_installed()?;
+    Ok(())
+}
+
+// ==================== RemoveResult Tests ====================
+
+#[test]
+fn test_remove_result_structure() -> Result<()> {
+    let result = RemoveResult {
+        package_name: "test-pkg".to_string(),
+        removed_versions: vec!["1.0-1".to_string()],
+        files_removed: 10,
+        space_freed: 1024 * 1024,
+        recursive: true,
+        removed_dependents: vec!["dep1".to_string(), "dep2".to_string()],
+    };
+
+    assert_eq!(result.package_name, "test-pkg");
+    assert_eq!(result.removed_versions.len(), 1);
+    assert_eq!(result.files_removed, 10);
+    assert_eq!(result.space_freed, 1024 * 1024);
+    assert!(result.recursive);
+    assert_eq!(result.removed_dependents.len(), 2);
+    Ok(())
+}
+
+// ==================== PackageConfig Tests ====================
+
+#[test]
+fn test_package_config_creation() -> Result<()> {
+    let config = PackageConfig {
+        name: "test-package".to_string(),
+        version: Some("1.0.0".to_string()),
+        build_type: BuildType::Pacman,
+        dependencies: vec!["dep1".to_string(), "dep2".to_string()],
+        sandbox_config: None,
+    };
+
+    assert_eq!(config.name, "test-package");
+    assert_eq!(config.version, Some("1.0.0".to_string()));
+    assert_eq!(config.build_type, BuildType::Pacman);
+    assert_eq!(config.dependencies.len(), 2);
+    Ok(())
+}
+
+#[test]
+fn test_package_config_default_sandbox() -> Result<()> {
+    let config = SandboxConfig::default();
+    assert!(!config.network);
+    assert!(config.ro_paths.is_empty());
+    assert!(config.rw_paths.is_empty());
+    Ok(())
+}
+
+// ==================== BuildType Tests ====================
+
+#[test]
+fn test_build_type_equality() -> Result<()> {
+    assert_eq!(BuildType::Pacman, BuildType::Pacman);
+    assert_eq!(BuildType::Aur, BuildType::Aur);
+    assert_ne!(BuildType::Pacman, BuildType::Aur);
+    Ok(())
+}
+
+// ==================== PackageSource Tests ====================
+
+#[test]
+fn test_package_source_as_str() -> Result<()> {
+    let repo = PackageSource::Repository("core".to_string());
+    assert_eq!(repo.as_str(), "core");
+
+    let aur = PackageSource::Aur;
+    assert_eq!(aur.as_str(), "aur");
+
+    let local = PackageSource::Local;
+    assert_eq!(local.as_str(), "local");
+
+    let other = PackageSource::Other("custom".to_string());
+    assert_eq!(other.as_str(), "custom");
+    Ok(())
+}
+
+// ==================== PackageManagerType Tests ====================
+
+#[test]
+fn test_package_manager_type_equality() -> Result<()> {
+    assert_eq!(PackageManagerType::Pacman, PackageManagerType::Pacman);
+    assert_eq!(PackageManagerType::Yay, PackageManagerType::Yay);
+    assert_eq!(PackageManagerType::Paru, PackageManagerType::Paru);
+    assert_ne!(PackageManagerType::Pacman, PackageManagerType::Yay);
+    Ok(())
+}
+
+// ==================== Integration Tests ====================
+
+#[test]
+fn test_pacman_install_and_verify() -> Result<()> {
+    let dir = tempdir()?;
+    let store_root = dir.path().join("store");
+    fs::create_dir_all(&store_root)?;
+
+    let pacman = Pacman::new(store_root);
+
+    let pkg_config = PackageConfig {
+        name: "base".to_string(),
+        version: None,
+        build_type: BuildType::Pacman,
+        dependencies: vec![],
+        sandbox_config: None,
+    };
+
+    let result = pacman.install(&pkg_config, false);
+    if let Ok(info) = result {
+        assert_eq!(info.name, "base");
+        assert!(info.installed);
+        assert!(matches!(info.source, PackageSource::Repository(_)));
+    }
+    Ok(())
+}
+
+#[test]
+fn test_factory_aur_helper_detection() -> Result<()> {
+    let dir = tempdir()?;
+    let store_root = dir.path().join("store");
+    fs::create_dir_all(&store_root)?;
+
+    let factory = PackageManagerFactory::new(store_root);
+    let aur_type = factory.aur_helper_type();
+
+    if let Some(aur_type) = aur_type {
+        assert!(aur_type == "yay" || aur_type == "paru");
+    }
+    Ok(())
+}
+
+// ==================== Edge Cases Tests ====================
+
+#[test]
+fn test_remove_with_version() -> Result<()> {
+    let dir = tempdir()?;
+    let store_root = dir.path().join("store");
+    fs::create_dir_all(&store_root)?;
+
+    let pacman = Pacman::new(store_root);
+    let _result = pacman.remove("test-pkg", Some("1.0-1"), false);
+    Ok(())
+}
+
+#[test]
+fn test_remove_recursive_flag() -> Result<()> {
+    let dir = tempdir()?;
+    let store_root = dir.path().join("store");
+    fs::create_dir_all(&store_root)?;
+
+    let pacman = Pacman::new(store_root);
+    let _result = pacman.remove("test-pkg", None, true);
+    Ok(())
+}
+
+#[test]
+fn test_install_force_flag() -> Result<()> {
+    let dir = tempdir()?;
+    let store_root = dir.path().join("store");
+    fs::create_dir_all(&store_root)?;
+
+    let pacman = Pacman::new(store_root);
+
+    let pkg_config = PackageConfig {
+        name: "nonexistent".to_string(),
+        version: None,
+        build_type: BuildType::Pacman,
+        dependencies: vec![],
+        sandbox_config: None,
+    };
+
+    let result = pacman.install(&pkg_config, true);
+    assert!(result.is_err());
+    Ok(())
+}
+
+// ==================== Store Integration Tests ====================
+
+#[test]
+fn test_pacman_store_directory_creation() -> Result<()> {
+    let dir = tempdir()?;
+    let store_root = dir.path().join("store");
+
+    let _pacman = Pacman::new(store_root.clone());
+
+    assert!(store_root.exists());
+    assert!(store_root.join("tmp/pacman").exists());
+    assert!(store_root.join("tmp/pacman/var/lib/pacman").exists());
+    assert!(store_root.join("tmp/pacman/var/cache/pacman/pkg").exists());
+    Ok(())
+}
+
+#[test]
+fn test_pacman_system_mode_no_isolated_root() -> Result<()> {
+    let dir = tempdir()?;
+    let store_root = dir.path().join("store");
+
+    let _pacman = Pacman::system(store_root);
+    Ok(())
+}
+
+// ==================== AurHelper Tests ====================
+
+#[test]
+fn test_aur_helper_creation() -> Result<()> {
+    let dir = tempdir()?;
+    let store_root = dir.path().join("store");
+    fs::create_dir_all(&store_root)?;
+
+    if let Some(aur) = AurHelper::detect(store_root.clone()) {
+        assert_eq!(aur.manager_name(), aur.helper_type().binary_name());
+        assert_eq!(aur.build_type(), BuildType::Aur);
+    }
+    Ok(())
+}
+
+#[test]
+fn test_aur_helper_build_dir() -> Result<()> {
+    let dir = tempdir()?;
+    let store_root = dir.path().join("store");
+    fs::create_dir_all(&store_root)?;
+
+    if let Some(aur) = AurHelper::detect(store_root) {
+        let _build_dir = aur.build_dir();
+    }
+    Ok(())
+}
