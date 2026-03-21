@@ -204,7 +204,7 @@ pub trait PackageManager: Send + Sync {
         recursive: bool,
     ) -> Result<RemoveResult>;
 
-    fn query_package_info(&self, name: &str) -> Result<Option<PackageInfo>>;
+    fn query_package_info(&self, name: &str, version: Option<&str>) -> Result<Option<PackageInfo>>;
 
     fn list_installed(&self) -> Result<Vec<InstalledPackage>>;
 

@@ -25,7 +25,11 @@ impl fmt::Display for ToolStatus {
             ToolStatus::Found => write!(f, "✓ Found"),
             ToolStatus::NotFound => write!(f, "✗ Not found"),
             ToolStatus::VersionMismatch { expected, found } => {
-                write!(f, "⚠ Version mismatch (expected {}, found {})", expected, found)
+                write!(
+                    f,
+                    "⚠ Version mismatch (expected {}, found {})",
+                    expected, found
+                )
             }
         }
     }
@@ -37,7 +41,7 @@ pub struct ToolchainManager {
     system_info: SystemInfo,
 }
 
-#[derive(Debug,Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemInfo {
     pub os: String,
     pub os_version: String,
@@ -229,9 +233,7 @@ impl ToolchainManager {
     }
 
     fn get_aur_helper_version(name: &str) -> Result<Option<String>> {
-        let output = Command::new(name)
-            .arg("--version")
-            .output();
+        let output = Command::new(name).arg("--version").output();
 
         match output {
             Ok(output) if output.status.success() => {
@@ -262,9 +264,15 @@ impl ToolchainManager {
         if let Ok(content) = std::fs::read_to_string("/etc/os-release") {
             for line in content.lines() {
                 if line.starts_with("NAME=") {
-                    self.system_info.os = line.trim_start_matches("NAME=").trim_matches('"').to_string();
+                    self.system_info.os = line
+                        .trim_start_matches("NAME=")
+                        .trim_matches('"')
+                        .to_string();
                 } else if line.starts_with("VERSION_ID=") {
-                    self.system_info.os_version = line.trim_start_matches("VERSION_ID=").trim_matches('"').to_string();
+                    self.system_info.os_version = line
+                        .trim_start_matches("VERSION_ID=")
+                        .trim_matches('"')
+                        .to_string();
                 }
             }
         }
@@ -284,7 +292,9 @@ impl ToolchainManager {
     }
 
     pub fn all_required_tools_available(&self) -> bool {
-        self.required_tools.iter().all(|t| t.status == ToolStatus::Found)
+        self.required_tools
+            .iter()
+            .all(|t| t.status == ToolStatus::Found)
     }
 
     pub fn get_report(&self) -> ToolchainReport {
@@ -312,7 +322,11 @@ impl fmt::Display for ToolchainReport {
         writeln!(f)?;
 
         writeln!(f, "System Information:")?;
-        writeln!(f, "  OS: {} {}", self.system_info.os, self.system_info.os_version)?;
+        writeln!(
+            f,
+            "  OS: {} {}",
+            self.system_info.os, self.system_info.os_version
+        )?;
         writeln!(f, "  Architecture: {}", self.system_info.architecture)?;
         writeln!(f, "  Kernel: {}", self.system_info.kernel)?;
         writeln!(f)?;

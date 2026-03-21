@@ -1,25 +1,25 @@
-use crate::store::Store;
-use crate::store::generation::Generation;
-use anyhow::Result;
 use crate::config::Configuration;
+use crate::store::generation::Generation;
+use crate::store::Store;
+use anyhow::Result;
 
 pub struct GenerationManager {
     store: Store,
 }
 
 impl GenerationManager {
-    pub fn build(&self, config: &Configuration) -> Result<u64>{
+    pub fn build(&self, config: &Configuration) -> Result<u64> {
         todo!()
     }
 
-    pub fn switch(&self, id: u64) -> Result<()>{
+    pub fn switch(&self, id: u64) -> Result<()> {
         todo!()
     }
 
-    pub fn list(&self) -> Result<Vec<Generation>>{
+    pub fn list(&self) -> Result<Vec<Generation>> {
         todo!()
     }
-    pub fn delete(&self, id: u64) -> Result<()>{
+    pub fn delete(&self, id: u64) -> Result<()> {
         todo!()
     }
 

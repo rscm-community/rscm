@@ -7,20 +7,22 @@ use crate::store::package::FileEntry;
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::fs;
-use std::io::Read;
+use std::fs::{self, File};
+use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::SystemTime;
 
 const PACMAN_DB_PATH: &str = "/var/lib/pacman";
+const ARCHIVE_URL: &str = "https://archive.archlinux.org";
 
 #[derive(Debug, Clone)]
 pub struct Pacman {
     isolated_root: Option<PathBuf>,
     isolated_db_path: Option<PathBuf>,
     cache_dir: PathBuf,
+    archive_cache_dir: PathBuf,
     privilege: PrivilegeManager,
     store_root: PathBuf,
 }
@@ -30,24 +32,31 @@ impl Pacman {
         let isolated_root = store_root.join("tmp/pacman");
         let isolated_db_path = isolated_root.join("var/lib/pacman");
         let cache_dir = isolated_root.join("var/cache/pacman/pkg");
+        let archive_cache_dir = store_root.join("cache/archive");
 
         fs::create_dir_all(&isolated_db_path).ok();
         fs::create_dir_all(&cache_dir).ok();
+        fs::create_dir_all(&archive_cache_dir).ok();
 
         Self {
             isolated_root: Some(isolated_root.clone()),
             isolated_db_path: Some(isolated_db_path),
             cache_dir,
+            archive_cache_dir,
             privilege: PrivilegeManager::new(),
             store_root,
         }
     }
 
     pub fn system(store_root: PathBuf) -> Self {
+        let archive_cache_dir = store_root.join("cache/archive");
+        fs::create_dir_all(&archive_cache_dir).ok();
+
         Self {
             isolated_root: None,
             isolated_db_path: None,
             cache_dir: PathBuf::from("/var/cache/pacman/pkg"),
+            archive_cache_dir,
             privilege: PrivilegeManager::new(),
             store_root,
         }
@@ -55,6 +64,13 @@ impl Pacman {
 
     fn get_isolated_root(&self) -> Option<&Path> {
         self.isolated_root.as_deref()
+    }
+
+    fn get_case_insensitive<'a>(map: &'a HashMap<String, String>, key: &str) -> Option<&'a String> {
+        let key_lower = key.to_lowercase();
+        map.iter()
+            .find(|(k, _)| k.to_lowercase() == key_lower)
+            .map(|(_, v)| v)
     }
 
     fn run_pacman_system(&self, args: &[&str]) -> Result<std::process::Output> {
@@ -67,6 +83,7 @@ impl Pacman {
         if !self.privilege.is_root() {
             cmd.arg("pacman");
         }
+        cmd.env("LC_ALL", "C");
         cmd.args(args);
 
         cmd.output()
@@ -94,6 +111,7 @@ impl Pacman {
             cmd.arg("pacman");
         }
 
+        cmd.env("LC_ALL", "C");
         cmd.arg("--root").arg(root);
         cmd.arg("--dbpath").arg(db_path);
         cmd.args(args);
@@ -128,12 +146,26 @@ impl Pacman {
         self.parse_pacman_qi_output(&String::from_utf8_lossy(&output.stdout), name)
     }
 
-    fn parse_pacman_qi_output(&self, output: &str, name: &str) -> Result<Option<PackageInfo>> {
+    pub fn package_info_from_sync_db(
+        &self,
+        name: &str,
+        _version: Option<&str>,
+    ) -> Result<Option<PackageInfo>> {
+        let output = self.run_pacman_system(&["-Si", name])?;
+
+        if !output.status.success() {
+            return Ok(None);
+        }
+
+        self.parse_pacman_si_output(&String::from_utf8_lossy(&output.stdout), name)
+    }
+
+    fn parse_pacman_si_output(&self, output: &str, name: &str) -> Result<Option<PackageInfo>> {
         let mut info_map: HashMap<String, String> = HashMap::new();
 
         for line in output.lines() {
             if let Some((key, value)) = line.split_once(':') {
-                let key = key.trim().to_lowercase();
+                let key = key.trim().to_string();
                 let value = value.trim().to_string();
                 info_map.insert(key, value);
             }
@@ -143,8 +175,7 @@ impl Pacman {
             return Ok(None);
         }
 
-        let version = info_map
-            .get("version")
+        let version = Self::get_case_insensitive(&info_map, "Version")
             .cloned()
             .unwrap_or_else(|| "0".to_string());
 
@@ -154,18 +185,77 @@ impl Pacman {
             (version.clone(), "1".to_string())
         };
 
-        let dependencies: Vec<String> = info_map
-            .get("depend on")
+        let repository = Self::get_case_insensitive(&info_map, "Repository")
+            .cloned()
+            .unwrap_or_else(|| "unknown".to_string());
+
+        let dependencies: Vec<String> = Self::get_case_insensitive(&info_map, "Depends On")
+            .map(|s| {
+                s.split_whitespace()
+                    .map(String::from)
+                    .filter(|s| s != "None")
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let optional_deps: Vec<String> = Self::get_case_insensitive(&info_map, "Optional Deps")
+            .map(|s| {
+                s.split_whitespace()
+                    .map(String::from)
+                    .filter(|s| s != "None")
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        Ok(Some(PackageInfo {
+            name: name.to_string(),
+            version: ver,
+            release: rel,
+            description: Self::get_case_insensitive(&info_map, "Description").cloned(),
+            dependencies,
+            optional_deps,
+            size: 0,
+            installed: self.exists_in_db(name),
+            manager: PackageManagerType::Pacman,
+            build_date: None,
+            source: PackageSource::Repository(repository),
+        }))
+    }
+
+    fn parse_pacman_qi_output(&self, output: &str, name: &str) -> Result<Option<PackageInfo>> {
+        let mut info_map: HashMap<String, String> = HashMap::new();
+
+        for line in output.lines() {
+            if let Some((key, value)) = line.split_once(':') {
+                let key = key.trim().to_string();
+                let value = value.trim().to_string();
+                info_map.insert(key, value);
+            }
+        }
+
+        if info_map.is_empty() {
+            return Ok(None);
+        }
+
+        let version = Self::get_case_insensitive(&info_map, "Version")
+            .cloned()
+            .unwrap_or_else(|| "0".to_string());
+
+        let (ver, rel) = if let Some(pos) = version.rfind('-') {
+            (version[..pos].to_string(), version[pos + 1..].to_string())
+        } else {
+            (version.clone(), "1".to_string())
+        };
+
+        let dependencies: Vec<String> = Self::get_case_insensitive(&info_map, "Depends On")
             .map(|s| s.split_whitespace().map(String::from).collect())
             .unwrap_or_default();
 
-        let optional_deps: Vec<String> = info_map
-            .get("optional deps")
+        let optional_deps: Vec<String> = Self::get_case_insensitive(&info_map, "Optional Deps")
             .map(|s| s.split_whitespace().map(String::from).collect())
             .unwrap_or_default();
 
-        let size: u64 = info_map
-            .get("installed size")
+        let size: u64 = Self::get_case_insensitive(&info_map, "Installed Size")
             .and_then(|s| {
                 s.replace(".", "")
                     .replace("K", "000")
@@ -176,8 +266,7 @@ impl Pacman {
             })
             .unwrap_or(0);
 
-        let build_date = info_map
-            .get("build date")
+        let build_date = Self::get_case_insensitive(&info_map, "Build Date")
             .and_then(|s| s.parse::<i64>().ok())
             .map(|t| SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(t as u64));
 
@@ -185,7 +274,7 @@ impl Pacman {
             name: name.to_string(),
             version: ver,
             release: rel,
-            description: info_map.get("description").cloned(),
+            description: Self::get_case_insensitive(&info_map, "Description").cloned(),
             dependencies,
             optional_deps,
             size,
@@ -219,15 +308,14 @@ impl Pacman {
             let mut info_map: HashMap<String, String> = HashMap::new();
             for line in block.lines() {
                 if let Some((key, value)) = line.split_once(':') {
-                    let key = key.trim().to_lowercase();
+                    let key = key.trim().to_string();
                     let value = value.trim().to_string();
                     info_map.insert(key, value);
                 }
             }
 
-            if let Some(name) = info_map.get("name") {
-                let version_str = info_map
-                    .get("version")
+            if let Some(name) = Self::get_case_insensitive(&info_map, "Name") {
+                let version_str = Self::get_case_insensitive(&info_map, "Version")
                     .cloned()
                     .unwrap_or_else(|| "0".to_string());
 
@@ -240,13 +328,11 @@ impl Pacman {
                     (version_str.clone(), "1".to_string())
                 };
 
-                let install_time = info_map
-                    .get("install date")
+                let install_time = Self::get_case_insensitive(&info_map, "Install Date")
                     .and_then(|s| self.parse_pacman_date(s))
                     .unwrap_or(SystemTime::UNIX_EPOCH);
 
-                let dependencies: Vec<String> = info_map
-                    .get("depend on")
+                let dependencies: Vec<String> = Self::get_case_insensitive(&info_map, "Depends On")
                     .map(|s| s.split_whitespace().map(String::from).collect())
                     .unwrap_or_default();
 
@@ -255,7 +341,7 @@ impl Pacman {
                     version,
                     release,
                     install_time,
-                    description: info_map.get("description").cloned(),
+                    description: Self::get_case_insensitive(&info_map, "Description").cloned(),
                     dependencies,
                     install_root: self
                         .isolated_root
@@ -271,37 +357,38 @@ impl Pacman {
     }
 
     fn parse_pacman_date(&self, date_str: &str) -> Option<SystemTime> {
+        let months = [
+            "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+        ];
+
         let parts: Vec<&str> = date_str.split_whitespace().collect();
-        if parts.len() < 2 {
+
+        let (year_idx, time_idx, month_idx, day_idx) = if parts.len() == 5 {
+            (4, 3, 1, 2)
+        } else if parts.len() == 6 {
+            (5, 4, 1, 2)
+        } else {
+            return None;
+        };
+
+        let year = parts[year_idx].parse::<u16>().ok()?;
+        let day = parts[day_idx].parse::<u8>().ok()?;
+        let time_parts: Vec<&str> = parts[time_idx].split(':').collect();
+        if time_parts.len() < 3 {
             return None;
         }
+        let hour = time_parts[0].parse::<u8>().ok()?;
+        let min = time_parts[1].parse::<u8>().ok()?;
+        let sec = time_parts[2].parse::<u8>().ok()?;
 
-        let date_part = parts[0];
-        let time_part = parts[1];
+        let month = months
+            .iter()
+            .position(|&m| m == parts[month_idx])
+            .map(|p| p as u8 + 1)?;
 
-        if let (Ok(year), Ok(month), Ok(day)) = (
-            date_part[0..4].parse::<u16>(),
-            date_part[5..7].parse::<u8>(),
-            date_part[8..10].parse::<u8>(),
-        ) {
-            let time_parts: Vec<&str> = time_part.split(':').collect();
-            if time_parts.len() >= 3 {
-                if let (Ok(hour), Ok(min), Ok(sec)) = (
-                    time_parts[0].parse::<u8>(),
-                    time_parts[1].parse::<u8>(),
-                    time_parts[2].parse::<u8>(),
-                ) {
-                    let days: i64 =
-                        (year as i64 - 1970) * 365 + (month as i64 - 1) * 30 + day as i64;
-                    let seconds: i64 =
-                        days * 86400 + hour as i64 * 3600 + min as i64 * 60 + sec as i64;
-                    return Some(
-                        SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(seconds as u64),
-                    );
-                }
-            }
-        }
-        None
+        let days: i64 = (year as i64 - 1970) * 365 + (month as i64 - 1) * 30 + day as i64;
+        let seconds: i64 = days * 86400 + hour as i64 * 3600 + min as i64 * 60 + sec as i64;
+        Some(SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(seconds as u64))
     }
 
     pub fn list_package_files(&self, name: &str) -> Result<Vec<String>> {
@@ -546,7 +633,7 @@ impl PackageManager for Pacman {
     fn install(&self, package: &PackageConfig, force: bool) -> Result<PackageInfo> {
         if !force && self.is_available_in_store(package) {
             return self
-                .query_package_info(&package.name)
+                .query_package_info(&package.name, package.version.as_deref())
                 .and_then(|info| info.ok_or_else(|| anyhow::anyhow!("Package not found")));
         }
 
@@ -594,7 +681,7 @@ impl PackageManager for Pacman {
         info.installed = true;
         info.source = PackageSource::Repository("core".to_string());
 
-        self.query_package_info(&package.name)
+        self.query_package_info(&package.name, package.version.as_deref())
             .and_then(|info| info.ok_or_else(|| anyhow::anyhow!("Package not found after install")))
     }
 
@@ -683,7 +770,16 @@ impl PackageManager for Pacman {
         })
     }
 
-    fn query_package_info(&self, name: &str) -> Result<Option<PackageInfo>> {
+    fn query_package_info(&self, name: &str, version: Option<&str>) -> Result<Option<PackageInfo>> {
+        if let Some(expected_version) = version {
+            println!("Fetching {} from Arch Linux Archive...", expected_version);
+            let archive_info = self.query_package_info_from_archive(name, expected_version)?;
+            return Ok(Some(archive_info));
+        }
+
+        if let Some(info) = self.package_info_from_sync_db(name, None)? {
+            return Ok(Some(info));
+        }
         self.package_info_from_system(name)
     }
 
@@ -701,6 +797,218 @@ impl PackageManager for Pacman {
 }
 
 impl Pacman {
+    pub fn query_package_info_from_archive(
+        &self,
+        name: &str,
+        version: &str,
+    ) -> Result<PackageInfo> {
+        let first_char = name.chars().next().unwrap_or('a');
+        let archive_path = format!("{}/packages/{}/{}", ARCHIVE_URL, first_char, name);
+
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(300))
+            .build()?;
+
+        let response = client.get(&archive_path).send()?;
+
+        if !response.status().is_success() {
+            return Err(anyhow::anyhow!(
+                "Package {} not found in Arch Linux Archive",
+                name
+            ));
+        }
+
+        let body = response.text()?;
+
+        let mut available_packages: Vec<String> = Vec::new();
+        for line in body.lines() {
+            if line.contains(".pkg.tar.zst") || line.contains(".pkg.tar.xz") {
+                if let Some(start) = line.find("href=\"") {
+                    let start = start + 6;
+                    if let Some(end) = line[start..].find("\"") {
+                        let filename = &line[start..start + end];
+                        if !filename.ends_with(".sig") && filename.contains(name) {
+                            available_packages.push(filename.to_string());
+                        }
+                    }
+                }
+            }
+        }
+
+        if available_packages.is_empty() {
+            return Err(anyhow::anyhow!(
+                "No packages found for {} in Arch Linux Archive",
+                name
+            ));
+        }
+
+        let target_prefix = format!("{}-{}", name, version);
+        let package_filename = available_packages
+            .iter()
+            .find(|p| {
+                p.starts_with(&target_prefix)
+                    && (p.ends_with(".pkg.tar.zst") || p.ends_with(".pkg.tar.xz"))
+            })
+            .cloned()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Version {} of package {} not found in Arch Linux Archive",
+                    version,
+                    name
+                )
+            })?;
+
+        let pkg_url = format!("{}/{}", archive_path, package_filename);
+
+        let cached_pkg_path = self.archive_cache_dir.join(&package_filename);
+
+        let pkg_path = if cached_pkg_path.exists() {
+            println!("Using cached {}-{}", name, version);
+            cached_pkg_path.clone()
+        } else {
+            let temp_dir = tempfile::tempdir()?;
+            let temp_pkg_path = temp_dir.path().join(&package_filename);
+
+            println!("Downloading {} from archive...", pkg_url);
+            let mut response = client.get(&pkg_url).send()?;
+            if !response.status().is_success() {
+                return Err(anyhow::anyhow!(
+                    "Failed to download package {} from archive",
+                    name
+                ));
+            }
+
+            let total_size = response.content_length().unwrap_or(0);
+            let mut file = File::create(&temp_pkg_path)?;
+            let mut downloaded: u64 = 0;
+            let mut buffer = vec![0u8; 64 * 1024];
+            loop {
+                match response.read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        file.write_all(&buffer[..n])?;
+                        downloaded += n as u64;
+                        if total_size > 0 {
+                            let pct = (downloaded * 100) / total_size;
+                            print!(
+                                "\rDownloading {}-{}: {}/{} ({}%)",
+                                name, version, downloaded, total_size, pct
+                            );
+                            std::io::stdout().flush().ok();
+                        } else {
+                            print!("\rDownloading {}: {} bytes", name, downloaded);
+                            std::io::stdout().flush().ok();
+                        }
+                    }
+                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
+                    Err(e) => return Err(anyhow::anyhow!("Download error: {}", e)),
+                }
+            }
+            println!();
+
+            fs::copy(&temp_pkg_path, &cached_pkg_path)?;
+            println!("Cached to {}", cached_pkg_path.display());
+
+            cached_pkg_path
+        };
+
+        let pkg_info = self.parse_package_file(&pkg_path, name, version)?;
+
+        Ok(pkg_info)
+    }
+
+    fn parse_package_file(
+        &self,
+        pkg_path: &Path,
+        name: &str,
+        version: &str,
+    ) -> Result<PackageInfo> {
+        println!("{:?}", pkg_path);
+        let file = File::open(pkg_path)?;
+        let file_size = file.metadata()?.len();
+
+        let decompressed: Box<dyn Read> = if pkg_path.to_string_lossy().ends_with(".zst") {
+            let mut decoder = zstd::stream::Decoder::new(file)?;
+            Box::new(std::io::BufReader::new(decoder))
+        } else {
+            Box::new(file)
+        };
+
+        let mut archive = tar::Archive::new(decompressed);
+
+        let mut pkginfo_content = None;
+        for entry in archive.entries()? {
+            let mut entry = entry?;
+            let path = entry.path()?.to_string_lossy().to_string();
+            if path.ends_with(".pkginfo") || path == ".PKGINFO" {
+                let mut content = String::new();
+                entry.read_to_string(&mut content)?;
+                pkginfo_content = Some(content);
+                break;
+            }
+        }
+
+        let (ver, rel) = if let Some(pos) = version.rfind('-') {
+            (version[..pos].to_string(), version[pos + 1..].to_string())
+        } else {
+            (version.to_string(), "1".to_string())
+        };
+
+        let mut dependencies = Vec::new();
+        let mut optional_deps = Vec::new();
+        let mut description = None;
+        let mut provides = Vec::new();
+        let mut conflicts = Vec::new();
+
+        if let Some(content) = pkginfo_content {
+            for line in content.lines() {
+                let line = line.trim();
+                if let Some(val) = line.strip_prefix("depend = ") {
+                    let dep = val.trim().to_string();
+                    if !dep.is_empty() {
+                        dependencies.push(dep);
+                    }
+                } else if let Some(val) = line.strip_prefix("optdepend = ") {
+                    let dep = val.trim().to_string();
+                    if !dep.is_empty() {
+                        optional_deps.push(dep);
+                    }
+                } else if let Some(val) = line.strip_prefix("provides = ") {
+                    let prov = val.trim().to_string();
+                    if !prov.is_empty() {
+                        provides.push(prov);
+                    }
+                } else if let Some(val) = line.strip_prefix("conflicts = ") {
+                    let conf = val.trim().to_string();
+                    if !conf.is_empty() {
+                        conflicts.push(conf);
+                    }
+                } else if let Some(val) = line.strip_prefix("replaces = ") {
+                    let rep = val.trim().to_string();
+                    if !rep.is_empty() {
+                        conflicts.push(rep);
+                    }
+                } else if let Some(desc) = line.strip_prefix("pkgdesc = ") {
+                    description = Some(desc.trim().to_string());
+                }
+            }
+        }
+
+        Ok(PackageInfo {
+            name: name.to_string(),
+            version: ver,
+            release: rel,
+            description,
+            dependencies,
+            optional_deps,
+            size: file_size,
+            installed: false,
+            manager: PackageManagerType::Pacman,
+            build_date: None,
+            source: PackageSource::Repository("archive".to_string()),
+        })
+    }
+
     fn check_dependencies(&self, package_name: &str) -> Result<Vec<String>> {
         let mut dependents = Vec::new();
 

@@ -1,6 +1,6 @@
 pub mod builtins;
 
-use crate::config::package::{BuildOptions, BuildType, PackageOptions};
+use crate::config::package::{BuildOptions, BuildType, PackageOptions, VersionOptions};
 use crate::config::{
     Configuration, DotfilesConfig, FirewallConfig, InterfaceConfig, NetworkConfig, PackageConfig,
     ServiceConfig, SystemConfig, SystemProfile, UserConfig,
@@ -63,7 +63,41 @@ impl<'a> LuaEngine {
 
             let setter = self.lua.create_function(move |lua: &Lua, table: Table| {
                 let root: Table = lua.globals().get("__config_root")?;
-                root.set(name.clone(), table)?;
+                let existing: Option<Table> = root.get(name.clone()).ok();
+
+                if let Some(existing_table) = existing {
+                    for pair in table.pairs::<Value, Value>() {
+                        let (key, value) = pair?;
+                        match key {
+                            Value::Integer(_) => {
+                                let len = existing_table.len().unwrap_or(0) as usize;
+                                existing_table.set(len + 1, value)?;
+                            }
+                            Value::String(s) => {
+                                if let Some(new_table) = value.as_table() {
+                                    if let Ok(existing_val) =
+                                        existing_table.get::<Value>(s.to_str()?)
+                                    {
+                                        if let Some(old_table) = existing_val.as_table() {
+                                            for p in new_table.clone().pairs::<Value, Value>() {
+                                                let (k, v) = p?;
+                                                old_table.set(k, v)?;
+                                            }
+                                            existing_table.set(s.to_str()?, old_table)?;
+                                            continue;
+                                        }
+                                    }
+                                }
+                                existing_table.set(s.to_str()?, value)?;
+                            }
+                            _ => {
+                                existing_table.set(key, value)?;
+                            }
+                        }
+                    }
+                } else {
+                    root.set(name.clone(), table)?;
+                }
                 Ok(())
             })?;
 
@@ -493,6 +527,44 @@ impl<'a> LuaEngine {
                                             }
                                         }
                                         pkg.build = Some(build_options);
+                                    }
+                                }
+                                "versions" => {
+                                    if let Some(versions_table) = v.as_table() {
+                                        let mut versions = HashMap::new();
+                                        for ver_pair in versions_table.pairs::<String, Table>() {
+                                            if let Ok((ver_key, ver_table)) = ver_pair {
+                                                let mut ver_opts = VersionOptions {
+                                                    version: ver_table
+                                                        .get::<String>("version")
+                                                        .unwrap_or_else(|_| ver_key.clone()),
+                                                    default: ver_table
+                                                        .get::<bool>("default")
+                                                        .unwrap_or(false),
+                                                    ..Default::default()
+                                                };
+                                                if let Ok(source) =
+                                                    ver_table.get::<String>("source")
+                                                {
+                                                    ver_opts.source = Some(source);
+                                                }
+                                                if let Ok(deps_table) =
+                                                    ver_table.get::<Table>("dependencies")
+                                                {
+                                                    let mut deps = Vec::new();
+                                                    for item in
+                                                        deps_table.sequence_values::<String>()
+                                                    {
+                                                        if let Ok(s) = item {
+                                                            deps.push(s);
+                                                        }
+                                                    }
+                                                    ver_opts.dependencies = deps;
+                                                }
+                                                versions.insert(ver_key, ver_opts);
+                                            }
+                                        }
+                                        pkg.versions = Some(versions);
                                     }
                                 }
                                 _ => {}

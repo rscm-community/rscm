@@ -1,11 +1,11 @@
 pub mod content;
-pub mod package;
 pub mod generation;
+pub mod package;
 pub mod reference;
 
 pub use content::ContentStore;
-pub use package::{Package, PackageStore};
 pub use generation::{Generation, GenerationStore};
+pub use package::{Package, PackageStore};
 pub use reference::ReferenceCounter;
 
 use anyhow::Result;

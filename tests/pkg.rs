@@ -1,7 +1,7 @@
 use anyhow::Result;
 use rscm::pkg::{
-    BuildType, PackageConfig, PackageManager, PackageManagerFactory, PackageManagerType,
-    PackageSource, RemoveResult, SandboxConfig, aur::AurHelper, lock::GlobalLock, pacman::Pacman,
+    aur::AurHelper, lock::GlobalLock, pacman::Pacman, BuildType, PackageConfig, PackageManager,
+    PackageManagerFactory, PackageManagerType, PackageSource, RemoveResult, SandboxConfig,
 };
 use std::fs;
 use tempfile::tempdir;
@@ -147,7 +147,7 @@ mod pacman_tests {
         fs::create_dir_all(&store_root)?;
 
         let pacman = Pacman::new(store_root);
-        let _result = pacman.query_package_info("bash");
+        let _result = pacman.query_package_info("bash", None);
         Ok(())
     }
 

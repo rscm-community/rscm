@@ -1,7 +1,9 @@
+pub mod cache;
 pub mod cli;
-pub mod lua;
-pub mod toolchain;
-pub mod store;
-pub mod pkg;
-pub mod core;
 pub mod config;
+pub mod core;
+pub mod lock;
+pub mod lua;
+pub mod pkg;
+pub mod store;
+pub mod toolchain;
