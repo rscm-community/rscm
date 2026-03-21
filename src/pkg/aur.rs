@@ -3,7 +3,7 @@ use super::{
     BuildType, InstalledPackage, PackageConfig, PackageInfo, PackageManager, PackageManagerType,
     PackageSource, SandboxConfig,
 };
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -198,21 +198,31 @@ impl AurHelper {
 
     fn get_specific_version(&self, name: &str, version: &str) -> Result<Option<PackageInfo>> {
         let repo_url = format!("https://aur.archlinux.org/{}.git", name);
-        let temp_dir = tempfile::tempdir()?;
-        let clone_dir = temp_dir.path();
+        let cache_dir = self.cache_dir.join(name);
 
-        Command::new("git")
-            .args([
-                "clone",
-                "--bare",
-                "--depth=500",
-                &repo_url,
-                clone_dir.to_str().unwrap(),
-            ])
-            .output()
-            .context("Failed to clone AUR repository")?;
+        let clone_dir = if cache_dir.exists() {
+            println!("Using cached AUR repository for {}", name);
+            cache_dir
+        } else {
+            println!(
+                "Cloning AUR repository for {} to fetch version {}...",
+                name, version
+            );
+            fs::create_dir_all(&self.cache_dir)?;
+            let status = Command::new("git")
+                .args(["clone", &repo_url, cache_dir.to_str().unwrap()])
+                .stdout(Stdio::inherit())
+                .stderr(Stdio::inherit())
+                .status()
+                .context("Failed to clone AUR repository")?;
+
+            if !status.success() {
+                return Err(anyhow!("Failed to clone AUR repository for {}", name));
+            }
+            cache_dir
+        };
         let tags_output = Command::new("git")
-            .current_dir(clone_dir)
+            .current_dir(&clone_dir)
             .args(["tag", "-l"])
             .output()
             .context("Failed to list tags");
@@ -227,7 +237,7 @@ impl AurHelper {
                         || tag.starts_with(&target_tag)
                         || tag.ends_with(&format!("-{}", version))
                     {
-                        let pkgbuild = self.fetch_pkgbuild_at_tag(clone_dir, tag)?;
+                        let pkgbuild = self.fetch_pkgbuild_at_tag(&clone_dir, tag)?;
                         return self.parse_pkgbuild(&pkgbuild, name);
                     }
                 }
@@ -235,14 +245,14 @@ impl AurHelper {
                 for line in tags_content.lines() {
                     let tag = line.trim();
                     if tag.contains(version) {
-                        let pkgbuild = self.fetch_pkgbuild_at_tag(clone_dir, tag)?;
+                        let pkgbuild = self.fetch_pkgbuild_at_tag(&clone_dir, tag)?;
                         return self.parse_pkgbuild(&pkgbuild, name);
                     }
                 }
             }
         }
 
-        if let Some(commit_pkgbuild) = self.find_commit_with_version(clone_dir, name, version)? {
+        if let Some(commit_pkgbuild) = self.find_commit_with_version(&clone_dir, name, version)? {
             return Ok(Some(commit_pkgbuild));
         }
 
@@ -797,6 +807,11 @@ impl PackageManager for AurHelper {
     }
 
     fn query_package_info(&self, name: &str, version: Option<&str>) -> Result<Option<PackageInfo>> {
+        if let Some(ver) = version {
+            println!("Fetching {} version {} from AUR...", name, ver);
+        } else {
+            println!("Fetching {} from AUR...", name);
+        }
         self.get_aur_info(name, version)
     }
 
