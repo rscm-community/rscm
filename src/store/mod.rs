@@ -21,6 +21,12 @@ pub struct Store {
 
 impl Store {
     pub fn new(root: PathBuf) -> Result<Self> {
+        if !root.exists() {
+            anyhow::bail!(
+                "Store directory {} does not exist. Run 'rscm init' first to initialize storage.",
+                root.display()
+            );
+        }
         let content = ContentStore::new(root.join("content"))?;
         let packages = PackageStore::new(root.join("packages"))?;
         let generations = GenerationStore::new(root.join("generations"))?;
@@ -60,7 +66,7 @@ impl Store {
 
     pub fn activate_generation(&self, id: u64) -> Result<()> {
         let gen_path = self.generations.path(id);
-        let current = Path::new("/run/rscm-system/current");
+        let current = Path::new("/rscm/current-system");
         if current.exists() {
             std::fs::remove_file(current)?;
         }

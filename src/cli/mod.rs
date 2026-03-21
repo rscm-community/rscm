@@ -4,11 +4,12 @@ use crate::lua::LuaEngine;
 use crate::toolchain::ToolchainManager;
 use anyhow::{anyhow, Result};
 use clap::{Parser, Subcommand};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const SYSTEM_CONFIG_PATH: &str = "/etc/rscm/configuration.lua";
 const LOCAL_CONFIG_NAME: &str = "configuration.lua";
 const USER_CONFIG_SUBDIR: &str = ".config/rscm";
+const SYSTEM_STORE_ROOT: &str = "/rscm/store";
 
 #[derive(Parser)]
 #[command(name = "rscm")]
@@ -20,6 +21,10 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
+    Init {
+        #[arg(long, short)]
+        force: bool,
+    },
     Edit,
     Build,
     Switch,
@@ -99,8 +104,99 @@ pub fn find_config_file(explicit_path: Option<&str>) -> Result<PathBuf> {
     ))
 }
 
+pub fn get_store_root() -> Result<PathBuf> {
+    let store = PathBuf::from(SYSTEM_STORE_ROOT);
+    if !store.exists() {
+        return Err(anyhow!(
+            "Store directory {} does not exist. Run 'sudo rscm init' first.",
+            SYSTEM_STORE_ROOT
+        ));
+    }
+    Ok(store)
+}
+
+pub fn init_store(force: bool) -> Result<PathBuf> {
+    let system_store = PathBuf::from(SYSTEM_STORE_ROOT);
+    let system_root = Path::new("/rscm");
+
+    if !force && system_store.exists() {
+        println!("✓ Store already exists at {}", SYSTEM_STORE_ROOT);
+    } else {
+        println!("Creating {} (requires root)...", SYSTEM_STORE_ROOT);
+
+        std::fs::create_dir_all(&system_store).map_err(|e| {
+            anyhow!(
+                "Failed to create {}: {}. Run with sudo.",
+                SYSTEM_STORE_ROOT,
+                e
+            )
+        })?;
+
+        println!("✓ Created {}", SYSTEM_STORE_ROOT);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let perms = std::fs::Permissions::from_mode(0o775);
+            let _ = std::fs::set_permissions(system_root, perms);
+            let perms2 = std::fs::Permissions::from_mode(0o775);
+            let _ = std::fs::set_permissions(&system_store, perms2);
+
+            println!("✓ Set permissions to 775 (owner:group can read/write)");
+        }
+
+        create_store_subdirs(&system_store)?;
+    }
+
+    println!("\nNote: To allow regular users to write to /rscm:");
+    println!("  sudo groupadd -f rscm");
+    println!("  sudo chown -R root:rscm /rscm");
+    println!("  sudo chmod -R 775 /rscm");
+    println!("  sudo usermod -aG rscm $USER");
+
+    Ok(system_store)
+}
+
+fn create_store_subdirs(store_root: &Path) -> Result<()> {
+    let subdirs = [
+        "content",
+        "packages",
+        "generations/generations",
+        "generations/profiles",
+        "cache/archive",
+        "cache/aur",
+        "sources",
+        "locks/history",
+        "locks/tags",
+        "log",
+    ];
+
+    for subdir in &subdirs {
+        let path = store_root.join(subdir);
+        std::fs::create_dir_all(&path)
+            .map_err(|e| anyhow!("Failed to create {}: {}", path.display(), e))?;
+    }
+
+    let refs_file = store_root.join("references.json");
+    if !refs_file.exists() {
+        std::fs::write(&refs_file, "{}")
+            .map_err(|e| anyhow!("Failed to create references.json: {}", e))?;
+    }
+
+    println!("✓ Created store subdirectories");
+    Ok(())
+}
+
 pub fn run(cli: Cli) -> Result<()> {
     match cli.command {
+        Commands::Init { force } => {
+            println!("Initializing rscm storage...");
+            let store_root = init_store(force)?;
+            println!("\nStore root: {}", store_root.display());
+            println!("You can now run 'rscm lock' to create a lock file.");
+            Ok(())
+        }
         Commands::Edit => todo!(),
         Commands::Build => todo!(),
         Commands::Switch => todo!(),
@@ -113,10 +209,7 @@ pub fn run(cli: Cli) -> Result<()> {
         } => {
             let config_path = find_config_file(config.as_deref())?;
 
-            let store_root = dirs::data_local_dir()
-                .unwrap_or_else(|| PathBuf::from("/var/lib"))
-                .join("rscm")
-                .join("store");
+            let store_root = get_store_root()?;
 
             let manager = LockManager::new(config_path.clone(), store_root);
             manager.lock(update, force)?;
@@ -188,10 +281,7 @@ pub fn run(cli: Cli) -> Result<()> {
             }
         }
         Commands::Cache { action } => {
-            let store_root = dirs::data_local_dir()
-                .unwrap_or_else(|| PathBuf::from("/var/lib"))
-                .join("rscm")
-                .join("store");
+            let store_root = get_store_root()?;
 
             let cache_manager = CacheManager::new(store_root);
 

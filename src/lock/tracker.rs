@@ -59,7 +59,7 @@ pub struct LockTracker {
 
 impl LockTracker {
     pub fn new(config_dir: &Path) -> Self {
-        let lock_path = config_dir.join("rscm.lock.toml");
+        let lock_path = config_dir.join("rscm.lock");
         Self { lock_path }
     }
 

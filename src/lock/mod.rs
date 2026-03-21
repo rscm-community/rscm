@@ -32,7 +32,6 @@ impl LockManager {
         let config_content = std::fs::read_to_string(&self.config_path)?;
         let engine = LuaEngine::new()?;
         let config = engine.load_config(&config_content)?;
-        println!("Config loaded: {:?}", config);
 
         let tracker = LockTracker::new(config_dir);
 

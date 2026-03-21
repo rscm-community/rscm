@@ -775,8 +775,8 @@ impl PackageManager for AurHelper {
             install_time: SystemTime::now(),
         };
 
-        let manifest_path = store_pkg_dir.join("manifest.json");
-        fs::write(manifest_path, serde_json::to_string_pretty(&pkg)?)?;
+        let manifest_path = store_pkg_dir.join("manifest.toml");
+        fs::write(manifest_path, toml::to_string_pretty(&pkg)?)?;
 
         info.installed = true;
         info.source = PackageSource::Aur;

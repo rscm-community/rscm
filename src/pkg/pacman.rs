@@ -675,8 +675,8 @@ impl PackageManager for Pacman {
             install_time: SystemTime::now(),
         };
 
-        let manifest_path = store_pkg_dir.join("manifest.json");
-        fs::write(manifest_path, serde_json::to_string_pretty(&pkg)?)?;
+        let manifest_path = store_pkg_dir.join("manifest.toml");
+        fs::write(manifest_path, toml::to_string_pretty(&pkg)?)?;
 
         info.installed = true;
         info.source = PackageSource::Repository("core".to_string());
@@ -923,7 +923,6 @@ impl Pacman {
         name: &str,
         version: &str,
     ) -> Result<PackageInfo> {
-        println!("{:?}", pkg_path);
         let file = File::open(pkg_path)?;
         let file_size = file.metadata()?.len();
 
@@ -1046,12 +1045,11 @@ impl Pacman {
             for entry in fs::read_dir(&generations_dir)? {
                 let entry = entry?;
                 let gen_path = entry.path();
-                let manifest_path = gen_path.join("manifest.json");
+                let manifest_path = gen_path.join("manifest.toml");
                 if manifest_path.exists() {
                     let content = fs::read_to_string(&manifest_path)?;
-                    if let Ok(manifest) = serde_json::from_str::<
-                        crate::store::generation::GenerationManifest,
-                    >(&content)
+                    if let Ok(manifest) =
+                        toml::from_str::<crate::store::generation::GenerationManifest>(&content)
                     {
                         if manifest
                             .packages

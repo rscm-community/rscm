@@ -63,8 +63,8 @@ impl GenerationStore {
             created: SystemTime::now(),
         };
         fs::write(
-            gen_path.join("manifest.json"),
-            serde_json::to_string_pretty(&manifest)?,
+            gen_path.join("manifest.toml"),
+            toml::to_string_pretty(&manifest)?,
         )?;
         Ok(id)
     }
@@ -81,10 +81,10 @@ impl GenerationStore {
             }
             if let Some(id_str) = path.file_name().and_then(|n| n.to_str()) {
                 if let Ok(id) = id_str.parse::<u64>() {
-                    let manifest_path = path.join("manifest.json");
+                    let manifest_path = path.join("manifest.toml");
                     if manifest_path.exists() {
                         let content = fs::read_to_string(manifest_path)?;
-                        let manifest = serde_json::from_str(&content)?;
+                        let manifest = toml::from_str(&content)?;
 
                         generations.push(Generation { id, path, manifest });
                     }
