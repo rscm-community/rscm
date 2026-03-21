@@ -7,7 +7,7 @@ use anyhow::{anyhow, Context, Result};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::SystemTime;
 use which::which;
 
@@ -446,18 +446,17 @@ impl AurHelper {
 
         fs::create_dir_all(&self.build_dir)?;
 
-        let output = Command::new("git")
+        println!("Cloning AUR repository for {}...", name);
+        let status = Command::new("git")
             .args(["clone", &format!("https://aur.archlinux.org/{}.git", name)])
             .current_dir(&self.build_dir)
-            .output()
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .status()
             .context("Failed to clone AUR repository")?;
 
-        if !output.status.success() {
-            return Err(anyhow!(
-                "Failed to clone AUR package {}: {}",
-                name,
-                String::from_utf8_lossy(&output.stderr)
-            ));
+        if !status.success() {
+            return Err(anyhow!("Failed to clone AUR package {}", name));
         }
 
         fs::create_dir_all(&cache_clone_dir)?;
@@ -506,6 +505,7 @@ impl AurHelper {
 
         let output = bwrap_cmd
             .current_dir(pkg_dir)
+            .stderr(Stdio::inherit())
             .output()
             .context("Failed to build package in sandbox")?;
 
@@ -531,6 +531,7 @@ impl AurHelper {
         sandbox_config: Option<&SandboxConfig>,
     ) -> Result<PathBuf> {
         let clone_dir = self.clone_aur_package(name)?;
+        println!("Building AUR package {}...", name);
 
         let sandbox = sandbox_config.cloned().unwrap_or_else(|| SandboxConfig {
             network: false,
@@ -542,26 +543,27 @@ impl AurHelper {
             rw_paths: vec![],
         });
 
-        if which("bubblewrap").is_ok() {
+        let pkg_file = if which("bubblewrap").is_ok() {
             self.build_in_sandbox(&clone_dir, &sandbox)
         } else {
             self.build_direct(&clone_dir)
-        }
+        }?;
+        println!("Successfully built AUR package {}", name);
+        Ok(pkg_file)
     }
 
     fn build_direct(&self, pkg_dir: &Path) -> Result<PathBuf> {
-        let output = Command::new("makepkg")
+        let status = Command::new("makepkg")
             .env("LC_ALL", "C")
             .args(["-s", "--noconfirm"])
             .current_dir(pkg_dir)
-            .output()
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .status()
             .context("Failed to build package")?;
 
-        if !output.status.success() {
-            return Err(anyhow!(
-                "Failed to build package: {}",
-                String::from_utf8_lossy(&output.stderr)
-            ));
+        if !status.success() {
+            return Err(anyhow!("Failed to build package"));
         }
 
         let pkg_files: Vec<PathBuf> = fs::read_dir(pkg_dir)?
@@ -577,17 +579,17 @@ impl AurHelper {
     }
 
     pub fn install_built_package(&self, pkg_file: &Path) -> Result<InstalledPackage> {
-        let output = Command::new(self.binary_path()?)
+        println!("Installing built AUR package...");
+        let status = Command::new(self.binary_path()?)
             .env("LC_ALL", "C")
             .args(["-U", "--noconfirm", &pkg_file.to_string_lossy()])
-            .output()
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .status()
             .context("Failed to install built package")?;
 
-        if !output.status.success() {
-            return Err(anyhow!(
-                "Failed to install package: {}",
-                String::from_utf8_lossy(&output.stderr)
-            ));
+        if !status.success() {
+            return Err(anyhow!("Failed to install AUR package"));
         }
 
         let pkg_name = pkg_file
