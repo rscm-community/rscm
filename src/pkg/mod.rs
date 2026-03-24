@@ -223,7 +223,6 @@ impl PackageManagerFactory {
         let pacman = Pacman::new(store_root.clone());
         let aur_helper = AurHelper::detect(store_root.clone()).map(|helper| {
             AurHelper::new(
-                Pacman::new(store_root.clone()),
                 helper.helper_type(),
                 helper.build_dir().clone(),
                 helper.pkg_dest().clone(),
@@ -235,16 +234,7 @@ impl PackageManagerFactory {
     }
 
     pub fn for_package(&self, config: &PackageConfig) -> Result<&dyn PackageManager> {
-        let is_aur = match config.build_type {
-            BuildType::Aur => true,
-            BuildType::Pacman => {
-                if let Some(ref aur) = self.aur_helper {
-                    aur.is_aur_package(&config.name)?
-                } else {
-                    false
-                }
-            }
-        };
+        let is_aur = config.build_type == BuildType::Aur;
 
         if is_aur {
             if let Some(ref aur) = self.aur_helper {

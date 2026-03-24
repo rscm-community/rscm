@@ -4,6 +4,7 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
+#[derive(Debug, Clone)]
 pub struct ContentStore {
     root: PathBuf,
 }

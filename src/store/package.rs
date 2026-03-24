@@ -24,6 +24,7 @@ pub struct Package {
     pub install_time: SystemTime,
 }
 
+#[derive(Debug, Clone)]
 pub struct PackageStore {
     root: PathBuf,
 }
@@ -66,6 +67,23 @@ impl PackageStore {
         }
         Ok(packages)
     }
+
+    pub fn list_all(&self) -> Result<Vec<Package>> {
+        let mut packages = Vec::new();
+        for entry in fs::read_dir(&self.root)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("json") {
+                if let Ok(content) = fs::read_to_string(&path) {
+                    if let Ok(pkg) = serde_json::from_str::<Package>(&content) {
+                        packages.push(pkg);
+                    }
+                }
+            }
+        }
+        Ok(packages)
+    }
+
     fn package_path(&self, name: &str, version: &str, release: &str) -> PathBuf {
         self.root
             .join(format!("{}-{}-{}.json", name, version, release))

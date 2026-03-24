@@ -4,6 +4,7 @@ use super::{
 };
 use crate::pkg::privilege::PrivilegeManager;
 use crate::store::package::FileEntry;
+use crate::store::{ContentStore, PackageStore};
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -25,6 +26,8 @@ pub struct Pacman {
     archive_cache_dir: PathBuf,
     privilege: PrivilegeManager,
     store_root: PathBuf,
+    package_store: PackageStore,
+    content_store: ContentStore,
 }
 
 impl Pacman {
@@ -38,6 +41,9 @@ impl Pacman {
         fs::create_dir_all(&cache_dir).ok();
         fs::create_dir_all(&archive_cache_dir).ok();
 
+        let package_store = PackageStore::new(store_root.join("packages")).unwrap();
+        let content_store = ContentStore::new(store_root.join("content")).unwrap();
+
         Self {
             isolated_root: Some(isolated_root.clone()),
             isolated_db_path: Some(isolated_db_path),
@@ -45,12 +51,17 @@ impl Pacman {
             archive_cache_dir,
             privilege: PrivilegeManager::new(),
             store_root,
+            package_store,
+            content_store,
         }
     }
 
     pub fn system(store_root: PathBuf) -> Self {
         let archive_cache_dir = store_root.join("cache/archive");
         fs::create_dir_all(&archive_cache_dir).ok();
+
+        let package_store = PackageStore::new(store_root.join("packages")).unwrap();
+        let content_store = ContentStore::new(store_root.join("content")).unwrap();
 
         Self {
             isolated_root: None,
@@ -59,6 +70,8 @@ impl Pacman {
             archive_cache_dir,
             privilege: PrivilegeManager::new(),
             store_root,
+            package_store,
+            content_store,
         }
     }
 
@@ -623,7 +636,10 @@ impl Pacman {
 
 impl PackageManager for Pacman {
     fn is_available_in_store(&self, package: &PackageConfig) -> bool {
-        self.exists_in_system(&package.name)
+        self.package_store
+            .get(&package.name)
+            .map(|p| p.is_some())
+            .unwrap_or(false)
     }
 
     fn ensure_in_store(&self, package: &PackageConfig) -> Result<PackageInfo> {
@@ -631,58 +647,21 @@ impl PackageManager for Pacman {
     }
 
     fn install(&self, package: &PackageConfig, force: bool) -> Result<PackageInfo> {
-        if !force && self.is_available_in_store(package) {
-            return self
-                .query_package_info(&package.name, package.version.as_deref())
-                .and_then(|info| info.ok_or_else(|| anyhow::anyhow!("Package not found")));
+        // 如果没有指定版本，先从sync db获取最新版本
+        let mut package_with_version = package.clone();
+        if package_with_version.version.is_none() {
+            if let Some(info) = self.package_info_from_sync_db(&package.name, None)? {
+                package_with_version.version = Some(format!("{}-{}", info.version, info.release));
+            } else {
+                return Err(anyhow::anyhow!(
+                    "Package {} not found in repository and no version specified",
+                    package.name
+                ));
+            }
         }
 
-        if !self.privilege.is_root() && !self.privilege.test_sudo() {
-            return Err(anyhow::anyhow!(
-                "Root privileges required for package installation"
-            ));
-        }
-
-        let (temp_dir, _installed) = self.install_to_isolated(&[package.name.clone()])?;
-        let temp_root = temp_dir.path();
-
-        let files = self.scan_package_files(&package.name, temp_root)?;
-
-        let mut info = self
-            .package_info_from_system(&package.name)?
-            .ok_or_else(|| anyhow::anyhow!("Package {} not found", package.name))?;
-
-        let build_hash = hex::encode(&Sha256::digest(format!(
-            "{}-{}-{}",
-            info.name, info.version, info.release
-        )));
-
-        let store_pkg_dir = self.store_root.join("packages").join(format!(
-            "{}-{}-{}-{}",
-            info.name,
-            info.version,
-            info.release,
-            &build_hash[..8]
-        ));
-        fs::create_dir_all(&store_pkg_dir)?;
-
-        let pkg = crate::store::Package {
-            name: info.name.clone(),
-            version: info.version.clone(),
-            release: info.release.clone(),
-            files,
-            dependencies: info.dependencies.clone(),
-            install_time: SystemTime::now(),
-        };
-
-        let manifest_path = store_pkg_dir.join("manifest.toml");
-        fs::write(manifest_path, toml::to_string_pretty(&pkg)?)?;
-
-        info.installed = true;
-        info.source = PackageSource::Repository("core".to_string());
-
-        self.query_package_info(&package.name, package.version.as_deref())
-            .and_then(|info| info.ok_or_else(|| anyhow::anyhow!("Package not found after install")))
+        // 使用新的archive安装方法，不再使用pacman安装
+        self.install_from_archive_to_store(&package_with_version, force)
     }
 
     fn remove(
@@ -697,28 +676,15 @@ impl PackageManager for Pacman {
             ));
         }
 
-        let packages_dir = self.store_root.join("packages");
-
-        let mut found_packages = Vec::new();
-        let pattern = match version {
-            Some(v) => format!("{}-{}-*.json", package_name, v),
-            None => format!("{}-*.json", package_name),
-        };
-
-        let glob_pattern = packages_dir.join(&pattern);
-        for entry in glob::glob(glob_pattern.to_str().unwrap())? {
-            let path = entry?;
-            if let Some(name) = path.file_stem().and_then(|n| n.to_str()) {
-                found_packages.push((name.to_string(), path));
+        let pkg = match self.package_store.get(package_name)? {
+            Some(p) => p,
+            None => {
+                return Err(anyhow::anyhow!(
+                    "Package {} not found in store",
+                    package_name
+                ));
             }
-        }
-
-        if found_packages.is_empty() {
-            return Err(anyhow::anyhow!(
-                "Package {} not found in store",
-                package_name
-            ));
-        }
+        };
 
         let mut removed_dependents = Vec::new();
         if recursive {
@@ -739,25 +705,22 @@ impl PackageManager for Pacman {
         let mut files_removed = 0;
         let mut space_freed = 0u64;
 
-        for (full_name, manifest_path) in &found_packages {
-            let content = fs::read_to_string(manifest_path)?;
-            let pkg: crate::store::Package = serde_json::from_str(&content)?;
+        for file in &pkg.files {
+            space_freed += file.size;
+            files_removed += 1;
+        }
 
-            for file in &pkg.files {
-                space_freed += file.size;
-                files_removed += 1;
-            }
+        let full_name = format!("{}-{}-{}", pkg.name, pkg.version, pkg.release);
+        removed_versions.push(full_name.clone());
 
-            fs::remove_file(manifest_path)?;
-
-            let parts: Vec<&str> = full_name.split('-').collect();
-            if parts.len() >= 2 {
-                removed_versions.push(format!(
-                    "{}-{}",
-                    parts[parts.len() - 2],
-                    parts[parts.len() - 1]
-                ));
-            }
+        // 使用PackageStore删除包（通过重命名来标记删除）
+        // PackageStore当前使用文件存储，直接删除文件
+        let pkg_path = self
+            .store_root
+            .join("packages")
+            .join(format!("{}.json", full_name));
+        if pkg_path.exists() {
+            fs::remove_file(pkg_path)?;
         }
 
         Ok(super::RemoveResult {
@@ -797,6 +760,232 @@ impl PackageManager for Pacman {
 }
 
 impl Pacman {
+    pub fn install_from_archive_to_store(
+        &self,
+        package: &PackageConfig,
+        force: bool,
+    ) -> Result<PackageInfo> {
+        let name = &package.name;
+        let version = package.version.as_deref().unwrap_or("");
+
+        if version.is_empty() {
+            return Err(anyhow::anyhow!(
+                "Version is required for archive installation"
+            ));
+        }
+
+        let pkg_info = self.query_package_info_from_archive(name, version)?;
+
+        // 检查是否已存在于store中
+        if !force && self.is_available_in_store(package) {
+            if let Ok(Some(pkg)) = self.package_store.get(name) {
+                return Ok(PackageInfo {
+                    name: name.to_string(),
+                    version: pkg.version,
+                    release: pkg.release,
+                    description: pkg_info.description,
+                    dependencies: pkg_info.dependencies,
+                    optional_deps: pkg_info.optional_deps,
+                    size: pkg_info.size,
+                    installed: true,
+                    manager: PackageManagerType::Pacman,
+                    build_date: pkg_info.build_date,
+                    source: PackageSource::Repository("archive".to_string()),
+                });
+            }
+        }
+
+        let first_char = name.chars().next().unwrap_or('a');
+        let archive_path = format!("{}/packages/{}/{}", ARCHIVE_URL, first_char, name);
+
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(300))
+            .build()?;
+
+        // 查找包文件
+        let response = client.get(&archive_path).send()?;
+        if !response.status().is_success() {
+            return Err(anyhow::anyhow!(
+                "Package {} not found in Arch Linux Archive",
+                name
+            ));
+        }
+
+        let body = response.text()?;
+        let mut available_packages: Vec<String> = Vec::new();
+        for line in body.lines() {
+            if line.contains(".pkg.tar.zst") || line.contains(".pkg.tar.xz") {
+                if let Some(start) = line.find("href=\"") {
+                    let start = start + 6;
+                    if let Some(end) = line[start..].find("\"") {
+                        let filename = &line[start..start + end];
+                        if !filename.ends_with(".sig") && filename.contains(name) {
+                            available_packages.push(filename.to_string());
+                        }
+                    }
+                }
+            }
+        }
+
+        if available_packages.is_empty() {
+            return Err(anyhow::anyhow!(
+                "No packages found for {} in Arch Linux Archive",
+                name
+            ));
+        }
+
+        let target_prefix = format!("{}-{}", name, version);
+        let package_filename = available_packages
+            .iter()
+            .find(|p| {
+                p.starts_with(&target_prefix)
+                    && (p.ends_with(".pkg.tar.zst") || p.ends_with(".pkg.tar.xz"))
+            })
+            .cloned()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Version {} of package {} not found in Arch Linux Archive",
+                    version,
+                    name
+                )
+            })?;
+
+        let pkg_url = format!("{}/{}", archive_path, package_filename);
+        let cached_pkg_path = self.archive_cache_dir.join(&package_filename);
+
+        let pkg_path = if cached_pkg_path.exists() {
+            println!("Using cached {}-{}", name, version);
+            cached_pkg_path.clone()
+        } else {
+            println!("Downloading {} from archive...", pkg_url);
+            let mut response = client.get(&pkg_url).send()?;
+            if !response.status().is_success() {
+                return Err(anyhow::anyhow!(
+                    "Failed to download package {} from archive",
+                    name
+                ));
+            }
+
+            let total_size = response.content_length().unwrap_or(0);
+            let mut file = File::create(&cached_pkg_path)?;
+            let mut downloaded: u64 = 0;
+            let mut buffer = vec![0u8; 64 * 1024];
+            loop {
+                match response.read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        file.write_all(&buffer[..n])?;
+                        downloaded += n as u64;
+                        if total_size > 0 {
+                            let pct = (downloaded * 100) / total_size;
+                            print!(
+                                "\rDownloading {}-{}: {}/{} ({}%)",
+                                name, version, downloaded, total_size, pct
+                            );
+                            std::io::stdout().flush().ok();
+                        } else {
+                            print!("\rDownloading {}: {} bytes", name, downloaded);
+                            std::io::stdout().flush().ok();
+                        }
+                    }
+                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
+                    Err(e) => return Err(anyhow::anyhow!("Download error: {}", e)),
+                }
+            }
+            println!();
+            cached_pkg_path.clone()
+        };
+
+        // 解析包信息
+        let (ver, rel) = if let Some(pos) = version.rfind('-') {
+            (version[..pos].to_string(), version[pos + 1..].to_string())
+        } else {
+            (version.to_string(), "1".to_string())
+        };
+
+        // 解压包文件到临时目录
+        let temp_dir = tempfile::tempdir()?;
+        let temp_extract_dir = temp_dir.path();
+
+        let file = File::open(&pkg_path)?;
+        let decompressed: Box<dyn Read> = if pkg_path.to_string_lossy().ends_with(".zst") {
+            let mut decoder = zstd::stream::Decoder::new(file)?;
+            Box::new(std::io::BufReader::new(decoder))
+        } else {
+            Box::new(file)
+        };
+
+        let mut archive = tar::Archive::new(decompressed);
+        let mut files = Vec::new();
+
+        for entry in archive.entries()? {
+            let mut entry = entry?;
+            let path = entry.path()?.to_string_lossy().to_string();
+
+            // 跳过.PKGINFO文件
+            if path.ends_with(".pkginfo") || path == ".PKGINFO" {
+                continue;
+            }
+
+            let full_path = temp_extract_dir.join(&path);
+
+            // 确保父目录存在
+            if let Some(parent) = full_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+
+            // 解压文件
+            entry.unpack(&full_path)?;
+
+            // 将文件添加到content store并记录信息
+            if let Ok(metadata) = fs::metadata(&full_path) {
+                let hash = self.content_store.add_file(&full_path)?;
+                let mode = metadata.permissions().mode() & 0o7777;
+                let symlink_target = if metadata.file_type().is_symlink() {
+                    fs::read_link(&full_path)
+                        .ok()
+                        .map(|p| p.to_string_lossy().to_string())
+                } else {
+                    None
+                };
+
+                files.push(FileEntry {
+                    path,
+                    hash,
+                    size: metadata.len(),
+                    mode,
+                    symlink_target,
+                });
+            }
+        }
+
+        // 使用PackageStore保存包信息
+        let pkg = crate::store::Package {
+            name: name.to_string(),
+            version: ver.clone(),
+            release: rel.clone(),
+            files,
+            dependencies: pkg_info.dependencies.clone(),
+            install_time: SystemTime::now(),
+        };
+
+        self.package_store.save(&pkg)?;
+
+        Ok(PackageInfo {
+            name: name.to_string(),
+            version: ver,
+            release: rel,
+            description: pkg_info.description,
+            dependencies: pkg_info.dependencies,
+            optional_deps: pkg_info.optional_deps,
+            size: pkg_info.size,
+            installed: true,
+            manager: PackageManagerType::Pacman,
+            build_date: pkg_info.build_date,
+            source: PackageSource::Repository("archive".to_string()),
+        })
+    }
+
     pub fn query_package_info_from_archive(
         &self,
         name: &str,
@@ -1011,20 +1200,11 @@ impl Pacman {
     fn check_dependencies(&self, package_name: &str) -> Result<Vec<String>> {
         let mut dependents = Vec::new();
 
-        let packages_dir = self.store_root.join("packages");
-        if packages_dir.exists() {
-            for entry in fs::read_dir(&packages_dir)? {
-                let entry = entry?;
-                let path = entry.path();
-                if path.extension().and_then(|e| e.to_str()) == Some("json") {
-                    let content = fs::read_to_string(&path)?;
-                    if let Ok(pkg) = serde_json::from_str::<crate::store::Package>(&content) {
-                        if pkg.dependencies.contains(&package_name.to_string()) {
-                            if !dependents.contains(&pkg.name) {
-                                dependents.push(pkg.name.clone());
-                            }
-                        }
-                    }
+        let packages = self.package_store.list_all()?;
+        for pkg in packages {
+            if pkg.dependencies.contains(&package_name.to_string()) {
+                if !dependents.contains(&pkg.name) {
+                    dependents.push(pkg.name.clone());
                 }
             }
         }

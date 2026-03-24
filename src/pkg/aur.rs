@@ -1,11 +1,13 @@
-use super::pacman::Pacman;
 use super::{
     BuildType, InstalledPackage, PackageConfig, PackageInfo, PackageManager, PackageManagerType,
     PackageSource, SandboxConfig,
 };
-use anyhow::{Context, Result, anyhow};
+use crate::store::package::FileEntry;
+use anyhow::{anyhow, Context, Result};
 use sha2::{Digest, Sha256};
 use std::fs;
+use std::io::Read;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::SystemTime;
@@ -40,9 +42,7 @@ impl AurHelperType {
 }
 
 #[derive(Debug, Clone)]
-#[allow(clippy::derive_partial_eq_without_hash)]
 pub struct AurHelper {
-    pacman: Pacman,
     helper_type: AurHelperType,
     build_dir: PathBuf,
     pkg_dest: PathBuf,
@@ -52,7 +52,6 @@ pub struct AurHelper {
 
 impl AurHelper {
     pub fn new(
-        pacman: Pacman,
         helper_type: AurHelperType,
         build_dir: PathBuf,
         pkg_dest: PathBuf,
@@ -62,7 +61,6 @@ impl AurHelper {
         let _ = fs::create_dir_all(&cache_dir);
 
         Self {
-            pacman,
             helper_type,
             build_dir,
             pkg_dest,
@@ -73,7 +71,6 @@ impl AurHelper {
 
     pub fn detect(store_root: PathBuf) -> Option<Self> {
         let helper_type = AurHelperType::detect()?;
-        let pacman = Pacman::new(store_root.clone());
 
         let build_dir = dirs::cache_dir()
             .unwrap_or_else(|| PathBuf::from("/tmp"))
@@ -85,13 +82,7 @@ impl AurHelper {
             .join("rscm")
             .join("aur-packages");
 
-        Some(Self::new(
-            pacman,
-            helper_type,
-            build_dir,
-            pkg_dest,
-            store_root,
-        ))
+        Some(Self::new(helper_type, build_dir, pkg_dest, store_root))
     }
 
     pub fn helper_type(&self) -> AurHelperType {
@@ -106,28 +97,17 @@ impl AurHelper {
         &self.pkg_dest
     }
 
-    pub fn binary_path(&self) -> Result<PathBuf> {
-        which(self.helper_type.binary_name())
-            .map_err(|_| anyhow!("{} not found in PATH", self.helper_type.binary_name()))
-    }
-
-    pub fn is_aur_package(&self, name: &str) -> Result<bool> {
-        let output = Command::new(self.binary_path()?)
-            .env("LC_ALL", "C")
-            .args(["-Si", name])
-            .output()?;
-
-        if !output.status.success() {
-            return Ok(false);
-        }
-
-        let output_str = String::from_utf8_lossy(&output.stdout);
-        for line in output_str.lines() {
-            if line.to_lowercase().starts_with("repository") {
-                return Ok(line.to_lowercase().contains(": aur"));
+    pub fn exists_in_store(&self, name: &str) -> bool {
+        let packages_dir = self.store_root.join("packages");
+        let pattern = format!("{}-*.toml", name);
+        if let Ok(paths) = glob::glob(packages_dir.join(&pattern).to_str().unwrap()) {
+            for entry in paths.flatten() {
+                if entry.exists() {
+                    return true;
+                }
             }
         }
-        Ok(false)
+        false
     }
 
     pub fn get_aur_info(&self, name: &str, version: Option<&str>) -> Result<Option<PackageInfo>> {
@@ -186,7 +166,7 @@ impl AurHelper {
             dependencies,
             optional_deps: vec![],
             size: 0,
-            installed: self.pacman.exists_in_db(name),
+            installed: self.exists_in_store(name),
             manager: match self.helper_type {
                 AurHelperType::Yay => PackageManagerType::Yay,
                 AurHelperType::Paru => PackageManagerType::Paru,
@@ -409,7 +389,7 @@ impl AurHelper {
             dependencies: depends,
             optional_deps: vec![],
             size: 0,
-            installed: self.pacman.exists_in_db(name),
+            installed: self.exists_in_store(name),
             manager: match self.helper_type {
                 AurHelperType::Yay => PackageManagerType::Yay,
                 AurHelperType::Paru => PackageManagerType::Paru,
@@ -588,45 +568,101 @@ impl AurHelper {
             .ok_or_else(|| anyhow!("No package file produced"))
     }
 
-    pub fn install_built_package(&self, pkg_file: &Path) -> Result<InstalledPackage> {
-        println!("Installing built AUR package...");
-        let status = Command::new(self.binary_path()?)
-            .env("LC_ALL", "C")
-            .args(["-U", "--noconfirm", &pkg_file.to_string_lossy()])
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .status()
-            .context("Failed to install built package")?;
+    fn extract_package_files(
+        &self,
+        pkg_file: &Path,
+        store_pkg_dir: &Path,
+    ) -> Result<Vec<FileEntry>> {
+        let file = std::fs::File::open(pkg_file)?;
 
-        if !status.success() {
-            return Err(anyhow!("Failed to install AUR package"));
+        let decompressed: Box<dyn Read> = if pkg_file.to_string_lossy().ends_with(".zst") {
+            let mut decoder = zstd::stream::Decoder::new(file)?;
+            Box::new(std::io::BufReader::new(decoder))
+        } else {
+            Box::new(file)
+        };
+
+        let mut archive = tar::Archive::new(decompressed);
+        let mut files = Vec::new();
+
+        for entry in archive.entries()? {
+            let mut entry = entry?;
+            let path = entry.path()?.to_string_lossy().to_string();
+
+            if path.ends_with(".pkginfo") || path == ".PKGINFO" {
+                continue;
+            }
+
+            let full_path = store_pkg_dir.join(&path);
+
+            if let Some(parent) = full_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+
+            entry.unpack(&full_path)?;
+
+            if let Ok(metadata) = fs::metadata(&full_path) {
+                let hash = self.compute_hash_for_path(&full_path)?;
+                let mode = metadata.permissions().mode() & 0o7777;
+                let symlink_target = if metadata.file_type().is_symlink() {
+                    fs::read_link(&full_path)
+                        .ok()
+                        .map(|p| p.to_string_lossy().to_string())
+                } else {
+                    None
+                };
+
+                files.push(FileEntry {
+                    path,
+                    hash,
+                    size: metadata.len(),
+                    mode,
+                    symlink_target,
+                });
+            }
         }
 
-        let pkg_name = pkg_file
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .and_then(|s| s.rsplit('-').nth(1))
-            .unwrap_or("unknown")
-            .to_string();
+        Ok(files)
+    }
 
-        let info = self
-            .get_aur_info(&pkg_name, None)?
-            .ok_or_else(|| anyhow!("Failed to get package info after installation"))?;
+    fn compute_hash_for_path(&self, path: &Path) -> Result<String> {
+        let mut file = fs::File::open(path)?;
+        let mut hasher = Sha256::new();
+        let mut buffer = [0u8; 8192];
 
-        Ok(InstalledPackage {
-            name: info.name,
-            version: info.version,
-            release: info.release,
-            install_time: SystemTime::now(),
-            description: info.description,
-            dependencies: info.dependencies,
-            install_root: PathBuf::from("/"),
-            files: vec![],
-            manager: match self.helper_type {
-                AurHelperType::Yay => PackageManagerType::Yay,
-                AurHelperType::Paru => PackageManagerType::Paru,
-            },
-        })
+        loop {
+            let bytes_read = file.read(&mut buffer)?;
+            if bytes_read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..bytes_read]);
+        }
+
+        Ok(hex::encode(hasher.finalize()))
+    }
+
+    fn check_dependencies(&self, package_name: &str) -> Result<Vec<String>> {
+        let mut dependents = Vec::new();
+
+        let packages_dir = self.store_root.join("packages");
+        if packages_dir.exists() {
+            for entry in fs::read_dir(&packages_dir)? {
+                let entry = entry?;
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) == Some("toml") {
+                    let content = fs::read_to_string(&path)?;
+                    if let Ok(pkg) = toml::from_str::<crate::store::Package>(&content) {
+                        if pkg.dependencies.contains(&package_name.to_string()) {
+                            if !dependents.contains(&pkg.name) {
+                                dependents.push(pkg.name.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(dependents)
     }
 }
 
@@ -717,6 +753,79 @@ impl Bubblewrap {
 
         Ok(())
     }
+
+    fn extract_package_files(
+        &self,
+        pkg_file: &Path,
+        store_pkg_dir: &Path,
+    ) -> Result<Vec<FileEntry>> {
+        let file = std::fs::File::open(pkg_file)?;
+
+        let decompressed: Box<dyn Read> = if pkg_file.to_string_lossy().ends_with(".zst") {
+            let mut decoder = zstd::stream::Decoder::new(file)?;
+            Box::new(std::io::BufReader::new(decoder))
+        } else {
+            Box::new(file)
+        };
+
+        let mut archive = tar::Archive::new(decompressed);
+        let mut files = Vec::new();
+
+        for entry in archive.entries()? {
+            let mut entry = entry?;
+            let path = entry.path()?.to_string_lossy().to_string();
+
+            if path.ends_with(".pkginfo") || path == ".PKGINFO" {
+                continue;
+            }
+
+            let full_path = store_pkg_dir.join(&path);
+
+            if let Some(parent) = full_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+
+            entry.unpack(&full_path)?;
+
+            if let Ok(metadata) = fs::metadata(&full_path) {
+                let hash = self.compute_hash_for_path(&full_path)?;
+                let mode = metadata.permissions().mode() & 0o7777;
+                let symlink_target = if metadata.file_type().is_symlink() {
+                    fs::read_link(&full_path)
+                        .ok()
+                        .map(|p| p.to_string_lossy().to_string())
+                } else {
+                    None
+                };
+
+                files.push(FileEntry {
+                    path,
+                    hash,
+                    size: metadata.len(),
+                    mode,
+                    symlink_target,
+                });
+            }
+        }
+
+        Ok(files)
+    }
+
+    fn compute_hash_for_path(&self, path: &Path) -> Result<String> {
+        let mut file = fs::File::open(path)?;
+        let mut hasher = Sha256::new();
+        let mut buffer = [0u8; 8192];
+
+        loop {
+            let bytes_read = file.read(&mut buffer)?;
+            if bytes_read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..bytes_read]);
+        }
+
+        Ok(hex::encode(hasher.finalize()))
+    }
 }
 
 impl Default for Bubblewrap {
@@ -727,7 +836,7 @@ impl Default for Bubblewrap {
 
 impl PackageManager for AurHelper {
     fn is_available_in_store(&self, package: &PackageConfig) -> bool {
-        self.pacman.exists_in_db(&package.name)
+        self.exists_in_store(&package.name)
     }
 
     fn ensure_in_store(&self, package: &PackageConfig) -> Result<PackageInfo> {
@@ -743,22 +852,6 @@ impl PackageManager for AurHelper {
 
         let sandbox = package.sandbox_config.as_ref();
         let pkg_file = self.build_package(&package.name, sandbox)?;
-
-        let temp_dir = tempfile::tempdir()?;
-        let temp_root = temp_dir.path();
-
-        Command::new(self.binary_path()?)
-            .env("LC_ALL", "C")
-            .args([
-                "-U",
-                "--noconfirm",
-                "--root",
-                &temp_root.to_string_lossy(),
-                &pkg_file.to_string_lossy(),
-            ])
-            .output()?;
-
-        let files = self.pacman.scan_package_files(&package.name, temp_root)?;
 
         let mut info = self
             .get_aur_info(&package.name, package.version.as_deref())?
@@ -777,6 +870,8 @@ impl PackageManager for AurHelper {
             &build_hash[..8]
         ));
         fs::create_dir_all(&store_pkg_dir)?;
+
+        let files = self.extract_package_files(&pkg_file, &store_pkg_dir)?;
 
         let pkg = crate::store::Package {
             name: info.name.clone(),
@@ -803,7 +898,75 @@ impl PackageManager for AurHelper {
         version: Option<&str>,
         recursive: bool,
     ) -> Result<super::RemoveResult> {
-        self.pacman.remove(package_name, version, recursive)
+        let packages_dir = self.store_root.join("packages");
+
+        let mut found_packages = Vec::new();
+        let pattern = match version {
+            Some(v) => format!("{}-{}-*.toml", package_name, v),
+            None => format!("{}-*.toml", package_name),
+        };
+
+        let glob_pattern = packages_dir.join(&pattern);
+        for entry in glob::glob(glob_pattern.to_str().unwrap())? {
+            let path = entry?;
+            if let Some(name) = path.file_stem().and_then(|n| n.to_str()) {
+                found_packages.push((name.to_string(), path));
+            }
+        }
+
+        if found_packages.is_empty() {
+            return Err(anyhow!("Package {} not found in store", package_name));
+        }
+
+        let mut removed_dependents = Vec::new();
+        if recursive {
+            let dependents = self.check_dependencies(package_name)?;
+            let mut visited = std::collections::HashSet::new();
+            visited.insert(package_name.to_string());
+
+            for dep in &dependents {
+                if !visited.contains(dep) {
+                    let result = self.remove(dep, None, true)?;
+                    removed_dependents.push(dep.clone());
+                    removed_dependents.extend(result.removed_dependents);
+                }
+            }
+        }
+
+        let mut removed_versions = Vec::new();
+        let mut files_removed = 0;
+        let mut space_freed = 0u64;
+
+        for (full_name, manifest_path) in &found_packages {
+            if let Ok(content) = fs::read_to_string(manifest_path) {
+                if let Ok(pkg) = toml::from_str::<crate::store::Package>(&content) {
+                    for file in &pkg.files {
+                        space_freed += file.size;
+                        files_removed += 1;
+                    }
+                }
+            }
+
+            fs::remove_file(manifest_path)?;
+
+            let parts: Vec<&str> = full_name.split('-').collect();
+            if parts.len() >= 2 {
+                removed_versions.push(format!(
+                    "{}-{}",
+                    parts[parts.len() - 2],
+                    parts[parts.len() - 1]
+                ));
+            }
+        }
+
+        Ok(super::RemoveResult {
+            package_name: package_name.to_string(),
+            removed_versions,
+            files_removed,
+            space_freed,
+            recursive,
+            removed_dependents,
+        })
     }
 
     fn query_package_info(&self, name: &str, version: Option<&str>) -> Result<Option<PackageInfo>> {
@@ -816,7 +979,50 @@ impl PackageManager for AurHelper {
     }
 
     fn list_installed(&self) -> Result<Vec<InstalledPackage>> {
-        self.pacman.list_installed_packages()
+        let mut installed = Vec::new();
+        let packages_dir = self.store_root.join("packages");
+
+        if packages_dir.exists() {
+            for entry in fs::read_dir(&packages_dir)? {
+                let entry = entry?;
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) == Some("toml") {
+                    if let Ok(content) = fs::read_to_string(&path) {
+                        if let Ok(pkg) = toml::from_str::<crate::store::Package>(&content) {
+                            let name_parts: Vec<&str> = path
+                                .file_stem()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("")
+                                .rsplit('-')
+                                .collect();
+
+                            let version = if name_parts.len() >= 2 {
+                                name_parts[name_parts.len() - 1]
+                            } else {
+                                &pkg.version
+                            };
+
+                            installed.push(InstalledPackage {
+                                name: pkg.name.clone(),
+                                version: pkg.version.clone(),
+                                release: pkg.release.clone(),
+                                install_time: pkg.install_time,
+                                description: None,
+                                dependencies: pkg.dependencies.clone(),
+                                install_root: PathBuf::from("/"),
+                                files: pkg.files.iter().map(|f| f.path.clone()).collect(),
+                                manager: match self.helper_type {
+                                    AurHelperType::Yay => PackageManagerType::Yay,
+                                    AurHelperType::Paru => PackageManagerType::Paru,
+                                },
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(installed)
     }
 
     fn build_type(&self) -> BuildType {
