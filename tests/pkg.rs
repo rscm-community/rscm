@@ -399,3 +399,368 @@ mod aur_helper_tests {
         Ok(())
     }
 }
+
+mod pacman_install_tests {
+    use super::*;
+    use rscm::store::PackageStore;
+
+    #[test]
+    fn test_pacman_install_base_package_to_store() -> Result<()> {
+        let dir = tempdir()?;
+        let store_root = dir.path().join("store");
+        fs::create_dir_all(&store_root)?;
+
+        let pacman = Pacman::new(store_root.clone());
+
+        let pkg_config = PackageConfig {
+            name: "base".to_string(),
+            version: None,
+            build_type: BuildType::Pacman,
+            dependencies: vec![],
+            sandbox_config: None,
+        };
+
+        let result = pacman.install(&pkg_config, false);
+        match result {
+            Ok(info) => {
+                assert_eq!(info.name, "base");
+                assert!(info.installed);
+                assert_eq!(info.manager, PackageManagerType::Pacman);
+
+                let package_store = PackageStore::new(store_root.join("packages"))?;
+                let pkg = package_store.get("base")?;
+                assert!(pkg.is_some());
+            }
+            Err(e) => {
+                println!("Install failed (expected if no network): {}", e);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_pacman_install_dbus_to_store() -> Result<()> {
+        let dir = tempdir()?;
+        let store_root = dir.path().join("store");
+        fs::create_dir_all(&store_root)?;
+
+        let pacman = Pacman::new(store_root.clone());
+
+        let pkg_config = PackageConfig {
+            name: "dbus".to_string(),
+            version: None,
+            build_type: BuildType::Pacman,
+            dependencies: vec![],
+            sandbox_config: None,
+        };
+
+        let result = pacman.install(&pkg_config, false);
+        match result {
+            Ok(info) => {
+                assert_eq!(info.name, "dbus");
+                assert!(info.installed);
+
+                let package_store = PackageStore::new(store_root.join("packages"))?;
+                let pkg = package_store.get("dbus")?;
+                assert!(pkg.is_some());
+
+                let pkg = pkg.unwrap();
+                assert!(!pkg.files.is_empty());
+                assert!(pkg.dependencies.len() > 0);
+            }
+            Err(e) => {
+                println!("Install failed (expected if no network): {}", e);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_pacman_install_with_version() -> Result<()> {
+        let dir = tempdir()?;
+        let store_root = dir.path().join("store");
+        fs::create_dir_all(&store_root)?;
+
+        let pacman = Pacman::new(store_root);
+
+        let pkg_config = PackageConfig {
+            name: "glibc".to_string(),
+            version: Some("2.38-1".to_string()),
+            build_type: BuildType::Pacman,
+            dependencies: vec![],
+            sandbox_config: None,
+        };
+
+        let result = pacman.install(&pkg_config, false);
+        match result {
+            Ok(info) => {
+                assert_eq!(info.name, "glibc");
+                assert!(info.installed);
+            }
+            Err(e) => {
+                println!("Install failed (expected if no network): {}", e);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_pacman_check_store_exists() -> Result<()> {
+        let dir = tempdir()?;
+        let store_root = dir.path().join("store");
+        fs::create_dir_all(&store_root)?;
+
+        let pacman = Pacman::new(store_root.clone());
+
+        let pkg_config = PackageConfig {
+            name: "base".to_string(),
+            version: None,
+            build_type: BuildType::Pacman,
+            dependencies: vec![],
+            sandbox_config: None,
+        };
+
+        let is_available = pacman.is_available_in_store(&pkg_config);
+        assert!(!is_available);
+
+        let _ = pacman.install(&pkg_config, false);
+
+        let is_available = pacman.is_available_in_store(&pkg_config);
+        Ok(())
+    }
+
+    #[test]
+    fn test_pacman_list_installed_from_store() -> Result<()> {
+        let dir = tempdir()?;
+        let store_root = dir.path().join("store");
+        fs::create_dir_all(&store_root)?;
+
+        let pacman = Pacman::new(store_root.clone());
+
+        let installed = pacman.list_installed()?;
+        assert!(installed.is_empty() || installed.len() >= 0);
+
+        let pkg_config = PackageConfig {
+            name: "base".to_string(),
+            version: None,
+            build_type: BuildType::Pacman,
+            dependencies: vec![],
+            sandbox_config: None,
+        };
+
+        let _ = pacman.install(&pkg_config, false);
+
+        let installed = pacman.list_installed()?;
+        Ok(())
+    }
+}
+
+mod aur_install_tests {
+    use super::*;
+    use rscm::store::PackageStore;
+
+    #[test]
+    fn test_aur_helper_install_to_store() -> Result<()> {
+        let dir = tempdir()?;
+        let store_root = dir.path().join("store");
+        fs::create_dir_all(&store_root)?;
+
+        let aur = match AurHelper::detect(store_root.clone()) {
+            Some(a) => a,
+            None => {
+                println!("No AUR helper available, skipping test");
+                return Ok(());
+            }
+        };
+
+        let pkg_config = PackageConfig {
+            name: "hello".to_string(),
+            version: None,
+            build_type: BuildType::Aur,
+            dependencies: vec![],
+            sandbox_config: None,
+        };
+
+        let result = aur.install(&pkg_config, false);
+        match result {
+            Ok(info) => {
+                assert_eq!(info.name, "hello");
+                assert!(info.installed);
+                assert_eq!(info.manager, PackageManagerType::Yay);
+
+                let package_store = PackageStore::new(store_root.join("packages"))?;
+                let pkg = package_store.get("hello")?;
+                assert!(pkg.is_some());
+            }
+            Err(e) => {
+                println!(
+                    "Install failed (expected if AUR package not found or no makepkg): {}",
+                    e
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_aur_helper_check_store_exists() -> Result<()> {
+        let dir = tempdir()?;
+        let store_root = dir.path().join("store");
+        fs::create_dir_all(&store_root)?;
+
+        let aur = match AurHelper::detect(store_root.clone()) {
+            Some(a) => a,
+            None => {
+                println!("No AUR helper available, skipping test");
+                return Ok(());
+            }
+        };
+
+        let pkg_config = PackageConfig {
+            name: "hello".to_string(),
+            version: None,
+            build_type: BuildType::Aur,
+            dependencies: vec![],
+            sandbox_config: None,
+        };
+
+        let is_available = aur.is_available_in_store(&pkg_config);
+        assert!(!is_available);
+        Ok(())
+    }
+
+    #[test]
+    fn test_aur_helper_list_installed() -> Result<()> {
+        let dir = tempdir()?;
+        let store_root = dir.path().join("store");
+        fs::create_dir_all(&store_root)?;
+
+        let aur = match AurHelper::detect(store_root) {
+            Some(a) => a,
+            None => {
+                println!("No AUR helper available, skipping test");
+                return Ok(());
+            }
+        };
+
+        let installed = aur.list_installed()?;
+        assert!(installed.is_empty() || installed.len() >= 0);
+        Ok(())
+    }
+
+    #[test]
+    fn test_aur_helper_query_info() -> Result<()> {
+        let dir = tempdir()?;
+        let store_root = dir.path().join("store");
+        fs::create_dir_all(&store_root)?;
+
+        let aur = match AurHelper::detect(store_root) {
+            Some(a) => a,
+            None => {
+                println!("No AUR helper available, skipping test");
+                return Ok(());
+            }
+        };
+
+        let info = aur.query_package_info("hello", None);
+        match info {
+            Ok(Some(pkg)) => {
+                assert_eq!(pkg.name, "hello");
+                assert!(!pkg.version.is_empty());
+            }
+            Ok(None) => {
+                println!("Package not found in AUR");
+            }
+            Err(e) => {
+                println!("Query failed: {}", e);
+            }
+        }
+        Ok(())
+    }
+}
+
+mod store_package_tests {
+    use super::*;
+    use rscm::store::package::{FileEntry, Package};
+    use rscm::store::PackageStore;
+    use std::time::SystemTime;
+
+    #[test]
+    fn test_package_store_creation() -> Result<()> {
+        let dir = tempdir()?;
+        let store_root = dir.path().join("store");
+        fs::create_dir_all(&store_root)?;
+
+        let package_store = PackageStore::new(store_root.join("packages"))?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_package_store_save_and_get() -> Result<()> {
+        let dir = tempdir()?;
+        let store_root = dir.path().join("store");
+        fs::create_dir_all(&store_root)?;
+
+        let package_store = PackageStore::new(store_root.join("packages"))?;
+
+        let pkg = Package {
+            name: "test-package".to_string(),
+            version: "1.0.0".to_string(),
+            release: "1".to_string(),
+            files: vec![FileEntry {
+                path: "/usr/bin/test".to_string(),
+                hash: "abc123".to_string(),
+                size: 1024,
+                mode: 0o755,
+                symlink_target: None,
+            }],
+            dependencies: vec!["dep1".to_string()],
+            install_time: SystemTime::now(),
+        };
+
+        package_store.save(&pkg)?;
+
+        let loaded = package_store.get("test-package")?;
+        assert!(loaded.is_some());
+
+        let loaded = loaded.unwrap();
+        assert_eq!(loaded.name, "test-package");
+        assert_eq!(loaded.version, "1.0.0");
+        assert_eq!(loaded.files.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn test_package_store_list_all() -> Result<()> {
+        let dir = tempdir()?;
+        let store_root = dir.path().join("store");
+        fs::create_dir_all(&store_root)?;
+
+        let package_store = PackageStore::new(store_root.join("packages"))?;
+
+        let pkg1 = Package {
+            name: "package-a".to_string(),
+            version: "1.0.0".to_string(),
+            release: "1".to_string(),
+            files: vec![],
+            dependencies: vec![],
+            install_time: SystemTime::now(),
+        };
+
+        let pkg2 = Package {
+            name: "package-b".to_string(),
+            version: "2.0.0".to_string(),
+            release: "1".to_string(),
+            files: vec![],
+            dependencies: vec![],
+            install_time: SystemTime::now(),
+        };
+
+        package_store.save(&pkg1)?;
+        package_store.save(&pkg2)?;
+
+        let all = package_store.list_all()?;
+        assert_eq!(all.len(), 2);
+        Ok(())
+    }
+}

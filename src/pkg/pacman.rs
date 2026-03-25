@@ -647,7 +647,6 @@ impl PackageManager for Pacman {
     }
 
     fn install(&self, package: &PackageConfig, force: bool) -> Result<PackageInfo> {
-        // 如果没有指定版本，先从sync db获取最新版本
         let mut package_with_version = package.clone();
         if package_with_version.version.is_none() {
             if let Some(info) = self.package_info_from_sync_db(&package.name, None)? {
@@ -660,7 +659,6 @@ impl PackageManager for Pacman {
             }
         }
 
-        // 使用新的archive安装方法，不再使用pacman安装
         self.install_from_archive_to_store(&package_with_version, force)
     }
 
@@ -713,8 +711,6 @@ impl PackageManager for Pacman {
         let full_name = format!("{}-{}-{}", pkg.name, pkg.version, pkg.release);
         removed_versions.push(full_name.clone());
 
-        // 使用PackageStore删除包（通过重命名来标记删除）
-        // PackageStore当前使用文件存储，直接删除文件
         let pkg_path = self
             .store_root
             .join("packages")
@@ -776,7 +772,6 @@ impl Pacman {
 
         let pkg_info = self.query_package_info_from_archive(name, version)?;
 
-        // 检查是否已存在于store中
         if !force && self.is_available_in_store(package) {
             if let Ok(Some(pkg)) = self.package_store.get(name) {
                 return Ok(PackageInfo {
@@ -802,7 +797,6 @@ impl Pacman {
             .timeout(std::time::Duration::from_secs(300))
             .build()?;
 
-        // 查找包文件
         let response = client.get(&archive_path).send()?;
         if !response.status().is_success() {
             return Err(anyhow::anyhow!(
@@ -896,14 +890,12 @@ impl Pacman {
             cached_pkg_path.clone()
         };
 
-        // 解析包信息
         let (ver, rel) = if let Some(pos) = version.rfind('-') {
             (version[..pos].to_string(), version[pos + 1..].to_string())
         } else {
             (version.to_string(), "1".to_string())
         };
 
-        // 解压包文件到临时目录
         let temp_dir = tempfile::tempdir()?;
         let temp_extract_dir = temp_dir.path();
 
@@ -922,22 +914,18 @@ impl Pacman {
             let mut entry = entry?;
             let path = entry.path()?.to_string_lossy().to_string();
 
-            // 跳过.PKGINFO文件
             if path.ends_with(".pkginfo") || path == ".PKGINFO" {
                 continue;
             }
 
             let full_path = temp_extract_dir.join(&path);
 
-            // 确保父目录存在
             if let Some(parent) = full_path.parent() {
                 fs::create_dir_all(parent)?;
             }
 
-            // 解压文件
             entry.unpack(&full_path)?;
 
-            // 将文件添加到content store并记录信息
             if let Ok(metadata) = fs::metadata(&full_path) {
                 let hash = self.content_store.add_file(&full_path)?;
                 let mode = metadata.permissions().mode() & 0o7777;
@@ -959,7 +947,6 @@ impl Pacman {
             }
         }
 
-        // 使用PackageStore保存包信息
         let pkg = crate::store::Package {
             name: name.to_string(),
             version: ver.clone(),
