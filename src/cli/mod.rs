@@ -246,7 +246,9 @@ fn build_system(system: Option<String>) -> Result<u64> {
     let config = load_config(config_path)?;
     let store_root = get_store_root()?;
     let mut store = Store::new(store_root)?;
-    store.create_generation(config)
+    let id = store.create_generation(config)?;
+    println!("New generation id: {}", id);
+    Ok(id)
 }
 
 pub fn run(cli: Cli) -> Result<()> {
