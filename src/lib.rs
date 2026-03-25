@@ -1,7 +1,6 @@
 pub mod cache;
 pub mod cli;
 pub mod config;
-pub mod core;
 pub mod lock;
 pub mod lua;
 pub mod pkg;

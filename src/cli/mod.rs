@@ -1,10 +1,16 @@
 use crate::cache::CacheManager;
+use crate::config::Configuration;
 use crate::lock::LockManager;
 use crate::lua::LuaEngine;
+use crate::store::Store;
 use crate::toolchain::ToolchainManager;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use clap::{Parser, Subcommand};
-use std::path::{Path, PathBuf};
+use nix::unistd::geteuid;
+use std::{
+    path::{Path, PathBuf},
+    process,
+};
 
 const SYSTEM_CONFIG_PATH: &str = "/etc/rscm/configuration.lua";
 const LOCAL_CONFIG_NAME: &str = "configuration.lua";
@@ -26,9 +32,23 @@ pub enum Commands {
         force: bool,
     },
     Edit,
-    Build,
-    Switch,
-    Generations,
+    Build {
+        #[arg(long, short)]
+        sync: bool,
+        #[arg(long)]
+        system: Option<String>,
+    },
+    Switch {
+        id: Option<u64>,
+        #[arg(long, short)]
+        sync: bool,
+        #[arg(long)]
+        system: Option<String>,
+    },
+    Generations {
+        #[command(subcommand)]
+        action: GenerationsAction,
+    },
     Shell,
     Lock {
         #[arg(long, short)]
@@ -50,6 +70,11 @@ pub enum Commands {
         #[command(subcommand)]
         action: CacheAction,
     },
+}
+
+#[derive(Subcommand)]
+pub enum GenerationsAction {
+    Delete,
 }
 
 #[derive(Subcommand)]
@@ -188,6 +213,42 @@ fn create_store_subdirs(store_root: &Path) -> Result<()> {
     Ok(())
 }
 
+fn check_root() {
+    let euid = geteuid();
+    if !euid.is_root() {
+        println!("Hint: This operation requires root privileges.\nRun with: sudo rscm <command>");
+        process::exit(-1);
+    }
+}
+
+fn lock_config(update: bool, force: bool, config: Option<String>) -> Result<()> {
+    let config_path = find_config_file(config.as_deref())?;
+    let store_root = get_store_root()?;
+    let manager = LockManager::new(config_path.clone(), store_root);
+    manager.lock(update, force)?;
+    Ok(())
+}
+
+fn load_config(config_path: PathBuf) -> Result<Configuration> {
+    let content = std::fs::read_to_string(&config_path)
+        .map_err(|e| anyhow!("Cannot read {}: {}", config_path.display(), e))?;
+
+    println!("Using configuration: {}", config_path.display());
+
+    let engine = LuaEngine::new()?;
+
+    engine.load_config(&content)
+}
+
+fn build_system(system: Option<String>) -> Result<u64> {
+    println!("Building new generation...",);
+    let config_path = find_config_file(Some(SYSTEM_CONFIG_PATH))?;
+    let config = load_config(config_path)?;
+    let store_root = get_store_root()?;
+    let mut store = Store::new(store_root)?;
+    store.create_generation(config)
+}
+
 pub fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Commands::Init { force } => {
@@ -198,39 +259,44 @@ pub fn run(cli: Cli) -> Result<()> {
             Ok(())
         }
         Commands::Edit => todo!(),
-        Commands::Build => todo!(),
-        Commands::Switch => todo!(),
-        Commands::Generations => todo!(),
+        Commands::Build { sync, system } => {
+            check_root();
+            if sync {
+                lock_config(true, false, Some(String::from(SYSTEM_CONFIG_PATH)))?;
+            }
+            build_system(system)?;
+            Ok(())
+        }
+        Commands::Switch { id, sync, system } => {
+            check_root();
+            let store_root = get_store_root()?;
+            let mut store = Store::new(store_root)?;
+            if let Some(id) = id {
+                store.activate_generation(id)?
+            } else if let Some(system) = system {
+            } else {
+                if sync {
+                    lock_config(true, false, Some(String::from(SYSTEM_CONFIG_PATH)))?;
+                }
+                let id = build_system(None)?;
+                store.activate_generation(id)?
+            }
+            Ok(())
+        }
+        Commands::Generations { action } => todo!(),
         Commands::Shell => todo!(),
         Commands::Lock {
             update,
             force,
             config,
-        } => {
-            let config_path = find_config_file(config.as_deref())?;
-
-            let store_root = get_store_root()?;
-
-            let manager = LockManager::new(config_path.clone(), store_root);
-            manager.lock(update, force)?;
-
-            Ok(())
-        }
+        } => lock_config(update, force, config),
         Commands::Check { path } => {
             let config_path = if path.is_empty() {
                 find_config_file(None)?
             } else {
                 PathBuf::from(&path)
             };
-
-            let content = std::fs::read_to_string(&config_path)
-                .map_err(|e| anyhow!("Cannot read {}: {}", config_path.display(), e))?;
-
-            println!("Using configuration: {}", config_path.display());
-
-            let engine = LuaEngine::new()?;
-
-            match engine.load_config(&content) {
+            match load_config(config_path) {
                 Ok(config) => {
                     println!("✓ Valid Lua syntax");
                     let sections: Vec<&str> = [

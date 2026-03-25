@@ -1,7 +1,7 @@
 use anyhow::Result;
 use rscm::pkg::{
-    aur::AurHelper, lock::GlobalLock, pacman::Pacman, BuildType, PackageConfig, PackageManager,
-    PackageManagerFactory, PackageManagerType, PackageSource, RemoveResult, SandboxConfig,
+    BuildType, PackageConfig, PackageManager, PackageManagerFactory, PackageManagerType,
+    PackageSource, RemoveResult, SandboxConfig, aur::AurHelper, lock::GlobalLock, pacman::Pacman,
 };
 use std::fs;
 use tempfile::tempdir;
@@ -538,7 +538,7 @@ mod pacman_install_tests {
         let pacman = Pacman::new(store_root.clone());
 
         let installed = pacman.list_installed()?;
-        assert!(installed.is_empty() || installed.len() >= 0);
+        assert!(installed.is_empty());
 
         let pkg_config = PackageConfig {
             name: "base".to_string(),
@@ -644,7 +644,7 @@ mod aur_install_tests {
         };
 
         let installed = aur.list_installed()?;
-        assert!(installed.is_empty() || installed.len() >= 0);
+        assert!(installed.is_empty());
         Ok(())
     }
 
@@ -681,8 +681,8 @@ mod aur_install_tests {
 
 mod store_package_tests {
     use super::*;
-    use rscm::store::package::{FileEntry, Package};
     use rscm::store::PackageStore;
+    use rscm::store::package::{FileEntry, Package};
     use std::time::SystemTime;
 
     #[test]

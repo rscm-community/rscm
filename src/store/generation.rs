@@ -1,14 +1,18 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
+
+use crate::config::{EnvironmentConfig, SystemConfig};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct GenerationManifest {
     pub id: u64,
     pub packages: Vec<String>,
     pub created: SystemTime,
+    pub variables: HashMap<String, String>,
 }
 
 #[derive(Debug)]
@@ -32,6 +36,7 @@ impl GenerationStore {
         &self,
         package_names: &[String],
         files: &[super::package::FileEntry],
+        environment_config: EnvironmentConfig,
         linker: F,
     ) -> Result<u64>
     where
@@ -57,10 +62,19 @@ impl GenerationStore {
                 }
             }
         }
+        let session_variables = environment_config
+            .session_variables
+            .unwrap_or(HashMap::new())
+            .into_iter()
+            .map(|(k, v)| format!("{}={}", k, v))
+            .collect::<Vec<String>>()
+            .join("\n");
+        fs::write(gen_path.join("session.env"), session_variables)?;
         let manifest = GenerationManifest {
             id,
             packages: package_names.to_vec(),
             created: SystemTime::now(),
+            variables: environment_config.variables.unwrap_or(HashMap::new()),
         };
         fs::write(
             gen_path.join("manifest.toml"),
