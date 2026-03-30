@@ -4,7 +4,7 @@ use crate::lock::LockManager;
 use crate::lua::LuaEngine;
 use crate::store::Store;
 use crate::toolchain::ToolchainManager;
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use clap::{Parser, Subcommand};
 use nix::unistd::geteuid;
 use std::{
@@ -28,45 +28,60 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
+    #[command(about = "Initialize the rscm storage")]
     Init {
-        #[arg(long, short)]
+        #[arg(
+            long,
+            short,
+            help = "Force initialization even if store already exists"
+        )]
         force: bool,
     },
+    #[command(about = "Edit the configuration file")]
     Edit,
+    #[command(about = "Build a new system generation")]
     Build {
-        #[arg(long, short)]
+        #[arg(long, short, help = "Sync lock file before building")]
         sync: bool,
-        #[arg(long)]
+        #[arg(long, help = "Specify the target system name")]
         system: Option<String>,
     },
+    #[command(about = "Switch to a different system generation")]
     Switch {
+        #[arg(help = "Generation ID to switch to")]
         id: Option<u64>,
-        #[arg(long, short)]
+        #[arg(long, short, help = "Sync lock file before switching")]
         sync: bool,
-        #[arg(long)]
+        #[arg(long, help = "Specify the target system name")]
         system: Option<String>,
     },
+    #[command(about = "Manage system generations")]
     Generations {
         #[command(subcommand)]
         action: GenerationsAction,
     },
+    #[command(about = "Start a shell session")]
     Shell,
+    #[command(about = "Lock the configuration")]
     Lock {
-        #[arg(long, short)]
+        #[arg(long, short, help = "Update existing lock file")]
         update: bool,
-        #[arg(long, short)]
+        #[arg(long, short, help = "Force lock creation")]
         force: bool,
-        #[arg(long, short)]
+        #[arg(long, short, help = "Path to configuration file")]
         config: Option<String>,
     },
+    #[command(about = "Check configuration syntax")]
     Check {
-        #[arg(default_value = "")]
+        #[arg(default_value = "", help = "Path to configuration file to check")]
         path: String,
     },
+    #[command(about = "Manage toolchain")]
     Toolchain {
         #[command(subcommand)]
         action: ToolchainAction,
     },
+    #[command(about = "Manage cache")]
     Cache {
         #[command(subcommand)]
         action: CacheAction,
@@ -75,32 +90,38 @@ pub enum Commands {
 
 #[derive(Subcommand)]
 pub enum GenerationsAction {
+    #[command(about = "List all system generations")]
     List,
+    #[command(about = "Delete system generations")]
     Delete {
+        #[arg(help = "Generation ID to delete")]
         id: Option<u64>,
-        #[arg(long, short)]
+        #[arg(long, short, help = "Keep the most recent N generations")]
         keep: Option<u64>,
-        #[arg(long, short)]
+        #[arg(long, short, help = "Remove the oldest N generations")]
         remove_oldest: Option<u64>,
-        #[arg(long, short)]
+        #[arg(long, short, help = "Delete all generations except the current one")]
         all: bool,
     },
 }
 
 #[derive(Subcommand)]
 pub enum ToolchainAction {
+    #[command(about = "Show toolchain status")]
     Status,
 }
 
 #[derive(Subcommand)]
 pub enum CacheAction {
+    #[command(about = "Show cache status")]
     Status,
+    #[command(about = "Clean cache")]
     Clean {
-        #[arg(long)]
+        #[arg(long, help = "Clean archive cache")]
         archive: bool,
-        #[arg(long)]
+        #[arg(long, help = "Clean AUR cache")]
         aur: bool,
-        #[arg(long)]
+        #[arg(long, help = "Clean all caches")]
         all: bool,
     },
 }
