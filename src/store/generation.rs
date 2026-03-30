@@ -85,6 +85,14 @@ impl GenerationStore {
     pub fn path(&self, id: u64) -> PathBuf {
         self.root.join(id.to_string())
     }
+
+    pub fn delete(&self, id: u64) -> Result<()> {
+        let gen_path = self.path(id);
+        if gen_path.exists() {
+            fs::remove_dir_all(gen_path)?;
+        }
+        Ok(())
+    }
     pub fn list(&self) -> Result<Vec<Generation>> {
         let mut generations = Vec::new();
         for entry in fs::read_dir(&self.root)? {

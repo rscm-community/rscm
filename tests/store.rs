@@ -1,4 +1,5 @@
 use anyhow::Result;
+use rscm::config::EnvironmentConfig;
 use rscm::store::*;
 use std::fs;
 use std::time::SystemTime;
@@ -57,7 +58,7 @@ fn test_generation_store() -> Result<()> {
 
     let files = vec![];
 
-    let id = store.create(&[], &files, |_hash, _target| Ok(()))?;
+    let id = store.create(&[], &files, EnvironmentConfig::default(),|_hash, _target| Ok(()))?;
     assert_eq!(id, 1);
 
     let generations = store.list()?;

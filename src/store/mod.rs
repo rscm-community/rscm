@@ -71,9 +71,9 @@ impl Store {
         let gen_path = self.generations.path(id);
         let current = Path::new("/rscm/current-system");
         if current.exists() {
-            fs::remove_file(current.clone())?;
+            fs::remove_file(current)?;
         }
-        std::os::unix::fs::symlink(gen_path, current.clone())?;
+        std::os::unix::fs::symlink(gen_path, current)?;
         let manifest_path = current.join("manifest.toml");
         let manifest: GenerationManifest = toml::from_str(&fs::read_to_string(manifest_path)?)?;
         let env_file_path = current.join("session.env");
@@ -99,5 +99,24 @@ impl Store {
             ),
         )?;
         Ok(())
+    }
+    pub fn delete_generation(&self, id: u64) -> Result<()> {
+        let current_link = Path::new("/rscm/current-system");
+        if current_link.exists() {
+            let current_target = fs::read_link(current_link)?;
+            if let Some(current_name) = current_target.file_name().and_then(|n| n.to_str()) {
+                if current_name == id.to_string() {
+                    anyhow::bail!(
+                        "Cannot delete generation {}: it is currently active. Use 'rscm switch' to switch to another generation first.",
+                        id
+                    );
+                }
+            }
+        }
+        self.generations.delete(id)
+    }
+
+    pub fn list_generations(&self) -> Result<Vec<Generation>> {
+        self.generations.list()
     }
 }

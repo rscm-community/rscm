@@ -8,6 +8,7 @@ use anyhow::{Result, anyhow};
 use clap::{Parser, Subcommand};
 use nix::unistd::geteuid;
 use std::{
+    fs,
     path::{Path, PathBuf},
     process,
 };
@@ -74,7 +75,16 @@ pub enum Commands {
 
 #[derive(Subcommand)]
 pub enum GenerationsAction {
-    Delete,
+    List,
+    Delete {
+        id: Option<u64>,
+        #[arg(long, short)]
+        keep: Option<u64>,
+        #[arg(long, short)]
+        remove_oldest: Option<u64>,
+        #[arg(long, short)]
+        all: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -285,7 +295,125 @@ pub fn run(cli: Cli) -> Result<()> {
             }
             Ok(())
         }
-        Commands::Generations { action } => todo!(),
+        Commands::Generations { action } => {
+            let store_root = get_store_root()?;
+            let store = Store::new(store_root)?;
+            match action {
+                GenerationsAction::List => {
+                    let generations = store.list_generations()?;
+                    if generations.is_empty() {
+                        println!("No generations found.");
+                    } else {
+                        let current_link = Path::new("/rscm/current-system");
+                        let current_name = if current_link.exists() {
+                            fs::read_link(current_link).ok().and_then(|p| {
+                                p.file_name()
+                                    .map(|n| n.to_os_string())
+                                    .and_then(|s| s.into_string().ok())
+                            })
+                        } else {
+                            None
+                        };
+                        for g in &generations {
+                            let is_current = current_name
+                                .as_ref()
+                                .map(|s| s == &g.id.to_string())
+                                .unwrap_or(false);
+                            let marker = if is_current { " (current)" } else { "" };
+                            println!("Generation {}{}", g.id, marker);
+                        }
+                    }
+                    Ok(())
+                }
+                GenerationsAction::Delete {
+                    id,
+                    keep,
+                    remove_oldest,
+                    all,
+                } => {
+                    check_root();
+                    let generations = store.list_generations()?;
+                    let current_link = Path::new("/rscm/current-system");
+                    let current_id = if current_link.exists() {
+                        fs::read_link(current_link)
+                            .ok()
+                            .and_then(|p| {
+                                p.file_name()
+                                    .map(|n| n.to_os_string())
+                                    .and_then(|s| s.into_string().ok())
+                            })
+                            .and_then(|s| s.parse::<u64>().ok())
+                    } else {
+                        None
+                    };
+
+                    if let Some(id) = id {
+                        store.delete_generation(id)
+                    } else if let Some(n) = keep {
+                        let mut ids: Vec<u64> = generations.iter().map(|g| g.id).collect();
+                        ids.sort();
+                        let keep_count = n as usize;
+                        let ids_to_keep: Vec<u64> =
+                            ids.iter().rev().take(keep_count).cloned().collect();
+                        let ids_to_delete: Vec<u64> = ids
+                            .iter()
+                            .filter(|id| !ids_to_keep.contains(id))
+                            .cloned()
+                            .collect();
+                        for id in ids_to_delete {
+                            if Some(id) != current_id {
+                                store.delete_generation(id)?;
+                            }
+                        }
+                        println!(
+                            "Deleted {} generations, kept {} most recent.",
+                            ids.len() - keep_count,
+                            keep_count
+                        );
+                        Ok(())
+                    } else if let Some(n) = remove_oldest {
+                        let mut ids: Vec<u64> = generations.iter().map(|g| g.id).collect();
+                        ids.sort();
+                        let remove_count = n as usize;
+                        let ids_to_delete: Vec<u64> =
+                            ids.iter().take(remove_count).cloned().collect();
+                        for id in ids_to_delete {
+                            if Some(id) != current_id {
+                                store.delete_generation(id)?;
+                            }
+                        }
+                        println!("Deleted {} oldest generations.", remove_count);
+                        Ok(())
+                    } else if all {
+                        println!(
+                            "WARNING: This will delete all generations except the current one."
+                        );
+                        print!("Are you sure? Type 'yes' to confirm: ");
+                        std::io::Write::flush(&mut std::io::stdout())?;
+                        let mut input = String::new();
+                        std::io::stdin().read_line(&mut input)?;
+                        if input.trim() == "yes" {
+                            let mut deleted = 0;
+                            for g in &generations {
+                                if Some(g.id) != current_id {
+                                    store.delete_generation(g.id)?;
+                                    deleted += 1;
+                                }
+                            }
+                            println!("Deleted {} generations.", deleted);
+                            Ok(())
+                        } else {
+                            println!("Aborted.");
+                            Ok(())
+                        }
+                    } else {
+                        Err(anyhow!(
+                            "Missing argument: 'id', 'keep', 'remove_oldest', 'all'\nPlease provide one of these arguments or use -h to get help."
+                        ))
+                    }
+                }
+            }
+        }
         Commands::Shell => todo!(),
         Commands::Lock {
             update,
