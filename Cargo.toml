@@ -30,3 +30,4 @@ xz2 = "0.1.7"
 zstd = "0.13.3"
 walkdir = "2.5.0"
 nix = { version = "0.31", features = ["user"] }
+flate2 = "1"

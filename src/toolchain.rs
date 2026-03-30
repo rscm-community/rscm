@@ -54,13 +54,6 @@ impl ToolchainManager {
         Self {
             required_tools: vec![
                 Tool {
-                    name: "pacman".to_string(),
-                    path: None,
-                    version: None,
-                    required: true,
-                    status: ToolStatus::NotFound,
-                },
-                Tool {
                     name: "bash".to_string(),
                     path: None,
                     version: None,
@@ -75,36 +68,13 @@ impl ToolchainManager {
                     status: ToolStatus::NotFound,
                 },
             ],
-            optional_tools: vec![
-                Tool {
-                    name: "yay".to_string(),
-                    path: None,
-                    version: None,
-                    required: false,
-                    status: ToolStatus::NotFound,
-                },
-                Tool {
-                    name: "paru".to_string(),
-                    path: None,
-                    version: None,
-                    required: false,
-                    status: ToolStatus::NotFound,
-                },
-                Tool {
-                    name: "git".to_string(),
-                    path: None,
-                    version: None,
-                    required: false,
-                    status: ToolStatus::NotFound,
-                },
-                Tool {
-                    name: "base-devel".to_string(), // for makepkg
-                    path: None,
-                    version: None,
-                    required: false,
-                    status: ToolStatus::NotFound,
-                },
-            ],
+            optional_tools: vec![Tool {
+                name: "git".to_string(),
+                path: None,
+                version: None,
+                required: false,
+                status: ToolStatus::NotFound,
+            }],
             system_info: SystemInfo {
                 os: String::new(),
                 os_version: String::new(),
@@ -141,18 +111,6 @@ impl ToolchainManager {
 
         tool.version = Self::get_tool_version(&tool.name)?;
 
-        if tool.name == "pacman" {
-            if let Some(version) = &tool.version {
-                if !version.starts_with("6.") {
-                    tool.status = ToolStatus::VersionMismatch {
-                        expected: "6.x".to_string(),
-                        found: version.clone(),
-                    };
-                    return Ok(());
-                }
-            }
-        }
-
         tool.status = ToolStatus::Found;
         Ok(())
     }
@@ -168,14 +126,6 @@ impl ToolchainManager {
             return Some("/usr/bin/coreutils".to_string());
         }
 
-        if name == "base-devel" {
-            return if which::which("makepkg").is_ok() {
-                Some("base-devel".to_string())
-            } else {
-                None
-            };
-        }
-
         which::which(name)
             .ok()
             .map(|p| p.to_string_lossy().to_string())
@@ -183,33 +133,12 @@ impl ToolchainManager {
 
     fn get_tool_version(name: &str) -> Result<Option<String>> {
         let version = match name {
-            "pacman" => Self::get_pacman_version()?,
             "bash" => Self::get_bash_version()?,
-            "yay" | "paru" => Self::get_aur_helper_version(name)?,
             "git" => Self::get_git_version()?,
-            "coreutils" | "base-devel" => None, // no version needed
             _ => None,
         };
 
         Ok(version)
-    }
-
-    fn get_pacman_version() -> Result<Option<String>> {
-        let output = Command::new("pacman")
-            .arg("--version")
-            .output()
-            .context("Failed to execute pacman --version")?;
-
-        if output.status.success() {
-            let version_str = String::from_utf8_lossy(&output.stdout);
-            if let Some(first_line) = version_str.lines().next() {
-                if let Some(ver) = first_line.split_whitespace().nth(1) {
-                    return Ok(Some(ver.trim_start_matches('v').to_string()));
-                }
-            }
-        }
-
-        Ok(None)
     }
 
     fn get_bash_version() -> Result<Option<String>> {
@@ -230,18 +159,6 @@ impl ToolchainManager {
         }
 
         Ok(None)
-    }
-
-    fn get_aur_helper_version(name: &str) -> Result<Option<String>> {
-        let output = Command::new(name).arg("--version").output();
-
-        match output {
-            Ok(output) if output.status.success() => {
-                let version_str = String::from_utf8_lossy(&output.stdout);
-                Ok(Some(version_str.trim().to_string()))
-            }
-            _ => Ok(None),
-        }
     }
 
     fn get_git_version() -> Result<Option<String>> {
@@ -359,8 +276,9 @@ impl fmt::Display for ToolchainReport {
             writeln!(f, "✅ Toolchain is ready")?;
         } else {
             writeln!(f, "❌ Toolchain is not ready - missing required tools")?;
-            writeln!(f, "   Please install missing tools using pacman:")?;
-            writeln!(f, "   sudo pacman -S pacman bash coreutils")?;
+            writeln!(f, "   Please install missing tools:")?;
+            writeln!(f, "   - bash")?;
+            writeln!(f, "   - coreutils (ln, cp, mv, rm, mkdir)")?;
         }
 
         Ok(())

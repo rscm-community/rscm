@@ -150,17 +150,6 @@ mod pacman_tests {
         let _result = pacman.query_package_info("bash", None);
         Ok(())
     }
-
-    #[test]
-    fn test_pacman_list_installed() -> Result<()> {
-        let dir = tempdir()?;
-        let store_root = dir.path().join("store");
-        fs::create_dir_all(&store_root)?;
-
-        let pacman = Pacman::new(store_root);
-        let _result = pacman.list_installed()?;
-        Ok(())
-    }
 }
 
 mod remove_result_tests {

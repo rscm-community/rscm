@@ -17,6 +17,8 @@ use std::time::SystemTime;
 
 const PACMAN_DB_PATH: &str = "/var/lib/pacman";
 const ARCHIVE_URL: &str = "https://archive.archlinux.org";
+const MIRROR_URL: &str = "https://geo.mirror.pkgbuild.com";
+const REPOS: &[&str] = &["core", "extra", "multilib"];
 
 #[derive(Debug, Clone)]
 pub struct Pacman {
@@ -24,6 +26,7 @@ pub struct Pacman {
     isolated_db_path: Option<PathBuf>,
     cache_dir: PathBuf,
     archive_cache_dir: PathBuf,
+    repo_db_cache_dir: PathBuf,
     privilege: PrivilegeManager,
     store_root: PathBuf,
     package_store: PackageStore,
@@ -36,10 +39,12 @@ impl Pacman {
         let isolated_db_path = isolated_root.join("var/lib/pacman");
         let cache_dir = isolated_root.join("var/cache/pacman/pkg");
         let archive_cache_dir = store_root.join("cache/archive");
+        let repo_db_cache_dir = store_root.join("cache/repo");
 
         fs::create_dir_all(&isolated_db_path).ok();
         fs::create_dir_all(&cache_dir).ok();
         fs::create_dir_all(&archive_cache_dir).ok();
+        fs::create_dir_all(&repo_db_cache_dir).ok();
 
         let package_store = PackageStore::new(store_root.join("packages")).unwrap();
         let content_store = ContentStore::new(store_root.join("content")).unwrap();
@@ -49,6 +54,7 @@ impl Pacman {
             isolated_db_path: Some(isolated_db_path),
             cache_dir,
             archive_cache_dir,
+            repo_db_cache_dir,
             privilege: PrivilegeManager::new(),
             store_root,
             package_store,
@@ -58,7 +64,9 @@ impl Pacman {
 
     pub fn system(store_root: PathBuf) -> Self {
         let archive_cache_dir = store_root.join("cache/archive");
+        let repo_db_cache_dir = store_root.join("cache/repo");
         fs::create_dir_all(&archive_cache_dir).ok();
+        fs::create_dir_all(&repo_db_cache_dir).ok();
 
         let package_store = PackageStore::new(store_root.join("packages")).unwrap();
         let content_store = ContentStore::new(store_root.join("content")).unwrap();
@@ -68,6 +76,7 @@ impl Pacman {
             isolated_db_path: None,
             cache_dir: PathBuf::from("/var/cache/pacman/pkg"),
             archive_cache_dir,
+            repo_db_cache_dir,
             privilege: PrivilegeManager::new(),
             store_root,
             package_store,
@@ -86,21 +95,237 @@ impl Pacman {
             .map(|(_, v)| v)
     }
 
-    fn run_pacman_system(&self, args: &[&str]) -> Result<std::process::Output> {
-        let mut cmd = if self.privilege.is_root() {
-            Command::new("pacman")
+    fn download_repo_db(&self, repo: &str) -> Result<PathBuf> {
+        let db_filename = format!("{}.db", repo);
+        let db_path = self.repo_db_cache_dir.join(&db_filename);
+
+        // Check if cache is fresh (less than 1 hour old)
+        if db_path.exists() {
+            if let Ok(metadata) = fs::metadata(&db_path) {
+                if let Ok(modified) = metadata.modified() {
+                    if modified.elapsed().unwrap_or_default().as_secs() < 3600 {
+                        return Ok(db_path);
+                    }
+                }
+            }
+        }
+
+        let url = format!("{}/{}", MIRROR_URL, db_filename);
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()?;
+
+        let response = client.get(&url).send()?;
+        if !response.status().is_success() {
+            return Err(anyhow::anyhow!(
+                "Failed to download repository database for {}: {}",
+                repo,
+                response.status()
+            ));
+        }
+
+        let temp_path = db_path.with_extension("tmp");
+        let mut file = File::create(&temp_path)?;
+        let content = response.bytes()?;
+        file.write_all(&content)?;
+
+        fs::rename(&temp_path, &db_path)?;
+        Ok(db_path)
+    }
+
+    fn parse_repo_db(&self, db_path: &Path, package_name: &str) -> Result<Option<PackageInfo>> {
+        let file = File::open(db_path)?;
+        let decompressed: Box<dyn Read> = if db_path.to_string_lossy().ends_with(".zst") {
+            let decoder = zstd::stream::Decoder::new(file)?;
+            Box::new(std::io::BufReader::new(decoder))
+        } else if db_path.to_string_lossy().ends_with(".gz") {
+            let decoder = flate2::read::GzDecoder::new(file);
+            Box::new(decoder)
         } else {
-            Command::new("sudo")
+            Box::new(file)
         };
 
-        if !self.privilege.is_root() {
-            cmd.arg("pacman");
-        }
-        cmd.env("LC_ALL", "C");
-        cmd.args(args);
+        let mut archive = tar::Archive::new(decompressed);
+        let entries = archive.entries()?;
 
-        cmd.output()
-            .map_err(|e| anyhow::anyhow!("Failed to run pacman: {}", e))
+        for entry in entries {
+            let mut entry = entry?;
+            let path = entry.path()?;
+            let path_str = path.to_string_lossy();
+
+            // Look for the package directory
+            if path_str.starts_with(&format!("{}/", package_name)) && path_str.ends_with("/desc") {
+                let mut content = String::new();
+                entry.read_to_string(&mut content)?;
+                return self.parse_desc_file(&content, package_name);
+            }
+        }
+
+        Ok(None)
+    }
+
+    fn parse_desc_file(&self, content: &str, package_name: &str) -> Result<Option<PackageInfo>> {
+        let mut info_map: HashMap<String, String> = HashMap::new();
+        let mut current_key = String::new();
+        let mut current_value = String::new();
+
+        for line in content.lines() {
+            if line.starts_with('%') && line.ends_with('%') {
+                if !current_key.is_empty() {
+                    info_map.insert(current_key.clone(), current_value.trim().to_string());
+                }
+                current_key = line.trim_matches('%').to_string();
+                current_value.clear();
+            } else if !current_key.is_empty() {
+                if !current_value.is_empty() {
+                    current_value.push('\n');
+                }
+                current_value.push_str(line);
+            }
+        }
+
+        if !current_key.is_empty() {
+            info_map.insert(current_key, current_value.trim().to_string());
+        }
+
+        if info_map.is_empty() {
+            return Ok(None);
+        }
+
+        let version = info_map.get("VERSION").cloned().unwrap_or_default();
+        let (ver, rel) = if let Some(pos) = version.rfind('-') {
+            (version[..pos].to_string(), version[pos + 1..].to_string())
+        } else {
+            (version, "1".to_string())
+        };
+
+        let dependencies: Vec<String> = info_map
+            .get("DEPENDS")
+            .map(|s| s.lines().map(String::from).collect())
+            .unwrap_or_default();
+
+        let optional_deps: Vec<String> = info_map
+            .get("OPTDEPENDS")
+            .map(|s| s.lines().map(String::from).collect())
+            .unwrap_or_default();
+
+        let size: u64 = info_map
+            .get("SIZE")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+
+        Ok(Some(PackageInfo {
+            name: package_name.to_string(),
+            version: ver,
+            release: rel,
+            description: info_map.get("DESC").cloned(),
+            dependencies,
+            optional_deps,
+            size,
+            installed: self.exists_in_db(package_name),
+            manager: PackageManagerType::Pacman,
+            build_date: None,
+            source: PackageSource::Repository("core".to_string()),
+        }))
+    }
+
+    fn get_package_info_from_repo_db(&self, name: &str) -> Result<Option<PackageInfo>> {
+        for repo in REPOS {
+            let db_path = self.download_repo_db(repo)?;
+            if let Some(info) = self.parse_repo_db(&db_path, name)? {
+                return Ok(Some(info));
+            }
+        }
+        Ok(None)
+    }
+
+    fn read_local_db_entry(&self, package_name: &str) -> Result<Option<HashMap<String, String>>> {
+        let local_db_path = if let Some(root) = &self.isolated_root {
+            root.join("var/lib/pacman/local")
+        } else {
+            PathBuf::from("/var/lib/pacman/local")
+        };
+
+        if !local_db_path.exists() {
+            return Ok(None);
+        }
+
+        for entry in fs::read_dir(&local_db_path)? {
+            let entry = entry?;
+            let dir_name = entry.file_name().to_string_lossy().to_string();
+
+            if dir_name.starts_with(&format!("{}-", package_name)) {
+                let desc_path = entry.path().join("desc");
+                if desc_path.exists() {
+                    let content = fs::read_to_string(&desc_path)?;
+                    let mut info_map = HashMap::new();
+                    let mut current_key = String::new();
+                    let mut current_value = String::new();
+
+                    for line in content.lines() {
+                        if line.starts_with('%') && line.ends_with('%') {
+                            if !current_key.is_empty() {
+                                info_map
+                                    .insert(current_key.clone(), current_value.trim().to_string());
+                            }
+                            current_key = line.trim_matches('%').to_string();
+                            current_value.clear();
+                        } else if !current_key.is_empty() {
+                            if !current_value.is_empty() {
+                                current_value.push('\n');
+                            }
+                            current_value.push_str(line);
+                        }
+                    }
+
+                    if !current_key.is_empty() {
+                        info_map.insert(current_key, current_value.trim().to_string());
+                    }
+
+                    return Ok(Some(info_map));
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
+    fn read_local_db_files(&self, package_name: &str) -> Result<Vec<String>> {
+        let local_db_path = if let Some(root) = &self.isolated_root {
+            root.join("var/lib/pacman/local")
+        } else {
+            PathBuf::from("/var/lib/pacman/local")
+        };
+
+        if !local_db_path.exists() {
+            return Ok(vec![]);
+        }
+
+        for entry in fs::read_dir(&local_db_path)? {
+            let entry = entry?;
+            let dir_name = entry.file_name().to_string_lossy().to_string();
+
+            if dir_name.starts_with(&format!("{}-", package_name)) {
+                let files_path = entry.path().join("files");
+                if files_path.exists() {
+                    let content = fs::read_to_string(&files_path)?;
+                    let files: Vec<String> = content
+                        .lines()
+                        .filter(|line| !line.is_empty() && !line.ends_with('/'))
+                        .map(|line| {
+                            if line.starts_with('/') {
+                                line[1..].to_string()
+                            } else {
+                                line.to_string()
+                            }
+                        })
+                        .collect();
+                    return Ok(files);
+                }
+            }
+        }
+
+        Ok(vec![])
     }
 
     fn run_pacman_isolated(&self, args: &[&str]) -> Result<std::process::Output> {
@@ -134,29 +359,30 @@ impl Pacman {
     }
 
     pub fn sync_database(&self) -> Result<()> {
-        let output = if self.isolated_root.is_some() {
-            self.run_pacman_isolated(&["-Sy"])?
-        } else {
-            self.run_pacman_system(&["-Sy"])?
-        };
-
-        if !output.status.success() {
-            return Err(anyhow::anyhow!(
-                "Failed to sync database: {}",
-                String::from_utf8_lossy(&output.stderr)
-            ));
+        for repo in REPOS {
+            self.download_repo_db(repo)?;
         }
         Ok(())
     }
 
     pub fn package_info_from_system(&self, name: &str) -> Result<Option<PackageInfo>> {
-        let output = self.run_pacman_system(&["-Qi", name])?;
-
-        if !output.status.success() {
-            return Ok(None);
+        if let Some(pkg) = self.package_store.get(name)? {
+            Ok(Some(PackageInfo {
+                name: pkg.name.clone(),
+                version: pkg.version.clone(),
+                release: pkg.release.clone(),
+                description: None,
+                dependencies: pkg.dependencies.clone(),
+                optional_deps: vec![],
+                size: 0,
+                installed: true,
+                manager: PackageManagerType::Pacman,
+                build_date: None,
+                source: PackageSource::Repository("local".to_string()),
+            }))
+        } else {
+            Ok(None)
         }
-
-        self.parse_pacman_qi_output(&String::from_utf8_lossy(&output.stdout), name)
     }
 
     pub fn package_info_from_sync_db(
@@ -164,266 +390,62 @@ impl Pacman {
         name: &str,
         _version: Option<&str>,
     ) -> Result<Option<PackageInfo>> {
-        let output = self.run_pacman_system(&["-Si", name])?;
-
-        if !output.status.success() {
-            return Ok(None);
-        }
-
-        self.parse_pacman_si_output(&String::from_utf8_lossy(&output.stdout), name)
-    }
-
-    fn parse_pacman_si_output(&self, output: &str, name: &str) -> Result<Option<PackageInfo>> {
-        let mut info_map: HashMap<String, String> = HashMap::new();
-
-        for line in output.lines() {
-            if let Some((key, value)) = line.split_once(':') {
-                let key = key.trim().to_string();
-                let value = value.trim().to_string();
-                info_map.insert(key, value);
-            }
-        }
-
-        if info_map.is_empty() {
-            return Ok(None);
-        }
-
-        let version = Self::get_case_insensitive(&info_map, "Version")
-            .cloned()
-            .unwrap_or_else(|| "0".to_string());
-
-        let (ver, rel) = if let Some(pos) = version.rfind('-') {
-            (version[..pos].to_string(), version[pos + 1..].to_string())
-        } else {
-            (version.clone(), "1".to_string())
-        };
-
-        let repository = Self::get_case_insensitive(&info_map, "Repository")
-            .cloned()
-            .unwrap_or_else(|| "unknown".to_string());
-
-        let dependencies: Vec<String> = Self::get_case_insensitive(&info_map, "Depends On")
-            .map(|s| {
-                s.split_whitespace()
-                    .map(String::from)
-                    .filter(|s| s != "None")
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        let optional_deps: Vec<String> = Self::get_case_insensitive(&info_map, "Optional Deps")
-            .map(|s| {
-                s.split_whitespace()
-                    .map(String::from)
-                    .filter(|s| s != "None")
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        Ok(Some(PackageInfo {
-            name: name.to_string(),
-            version: ver,
-            release: rel,
-            description: Self::get_case_insensitive(&info_map, "Description").cloned(),
-            dependencies,
-            optional_deps,
-            size: 0,
-            installed: self.exists_in_db(name),
-            manager: PackageManagerType::Pacman,
-            build_date: None,
-            source: PackageSource::Repository(repository),
-        }))
-    }
-
-    fn parse_pacman_qi_output(&self, output: &str, name: &str) -> Result<Option<PackageInfo>> {
-        let mut info_map: HashMap<String, String> = HashMap::new();
-
-        for line in output.lines() {
-            if let Some((key, value)) = line.split_once(':') {
-                let key = key.trim().to_string();
-                let value = value.trim().to_string();
-                info_map.insert(key, value);
-            }
-        }
-
-        if info_map.is_empty() {
-            return Ok(None);
-        }
-
-        let version = Self::get_case_insensitive(&info_map, "Version")
-            .cloned()
-            .unwrap_or_else(|| "0".to_string());
-
-        let (ver, rel) = if let Some(pos) = version.rfind('-') {
-            (version[..pos].to_string(), version[pos + 1..].to_string())
-        } else {
-            (version.clone(), "1".to_string())
-        };
-
-        let dependencies: Vec<String> = Self::get_case_insensitive(&info_map, "Depends On")
-            .map(|s| s.split_whitespace().map(String::from).collect())
-            .unwrap_or_default();
-
-        let optional_deps: Vec<String> = Self::get_case_insensitive(&info_map, "Optional Deps")
-            .map(|s| s.split_whitespace().map(String::from).collect())
-            .unwrap_or_default();
-
-        let size: u64 = Self::get_case_insensitive(&info_map, "Installed Size")
-            .and_then(|s| {
-                s.replace(".", "")
-                    .replace("K", "000")
-                    .replace("M", "000000")
-                    .replace("G", "000000000")
-                    .parse()
-                    .ok()
-            })
-            .unwrap_or(0);
-
-        let build_date = Self::get_case_insensitive(&info_map, "Build Date")
-            .and_then(|s| s.parse::<i64>().ok())
-            .map(|t| SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(t as u64));
-
-        Ok(Some(PackageInfo {
-            name: name.to_string(),
-            version: ver,
-            release: rel,
-            description: Self::get_case_insensitive(&info_map, "Description").cloned(),
-            dependencies,
-            optional_deps,
-            size,
-            installed: true,
-            manager: PackageManagerType::Pacman,
-            build_date,
-            source: PackageSource::Repository("core".to_string()),
-        }))
+        self.get_package_info_from_repo_db(name)
     }
 
     pub fn list_installed_packages(&self) -> Result<Vec<InstalledPackage>> {
-        let output = self.run_pacman_system(&["-Q", "--info"])?;
-
-        if !output.status.success() {
-            return Err(anyhow::anyhow!("Failed to list installed packages"));
+        let generations_dir = self.store_root.join("generations");
+        if !generations_dir.exists() {
+            return Ok(vec![]);
         }
 
-        let output_str = String::from_utf8_lossy(&output.stdout);
-        self.parse_installed_packages(&output_str)
-    }
-
-    fn parse_installed_packages(&self, output: &str) -> Result<Vec<InstalledPackage>> {
         let mut packages = Vec::new();
-        let package_blocks: Vec<&str> = output.split("\n\n").collect();
+        let mut seen = std::collections::HashSet::new();
 
-        for block in package_blocks {
-            if block.trim().is_empty() {
-                continue;
-            }
-
-            let mut info_map: HashMap<String, String> = HashMap::new();
-            for line in block.lines() {
-                if let Some((key, value)) = line.split_once(':') {
-                    let key = key.trim().to_string();
-                    let value = value.trim().to_string();
-                    info_map.insert(key, value);
+        for entry in fs::read_dir(&generations_dir)? {
+            let entry = entry?;
+            let gen_path = entry.path();
+            let manifest_path = gen_path.join("manifest.toml");
+            if manifest_path.exists() {
+                let content = fs::read_to_string(&manifest_path)?;
+                if let Ok(manifest) =
+                    toml::from_str::<crate::store::generation::GenerationManifest>(&content)
+                {
+                    for package_name in &manifest.packages {
+                        if seen.insert(package_name.clone()) {
+                            if let Some(pkg) = self.package_store.get(package_name)? {
+                                let files: Vec<String> =
+                                    pkg.files.iter().map(|f| f.path.clone()).collect();
+                                packages.push(InstalledPackage {
+                                    name: pkg.name.clone(),
+                                    version: pkg.version.clone(),
+                                    release: pkg.release.clone(),
+                                    install_time: pkg.install_time,
+                                    description: None,
+                                    dependencies: pkg.dependencies.clone(),
+                                    install_root: self
+                                        .isolated_root
+                                        .clone()
+                                        .unwrap_or_else(|| PathBuf::from("/")),
+                                    files,
+                                    manager: PackageManagerType::Pacman,
+                                });
+                            }
+                        }
+                    }
                 }
-            }
-
-            if let Some(name) = Self::get_case_insensitive(&info_map, "Name") {
-                let version_str = Self::get_case_insensitive(&info_map, "Version")
-                    .cloned()
-                    .unwrap_or_else(|| "0".to_string());
-
-                let (version, release) = if let Some(pos) = version_str.rfind('-') {
-                    (
-                        version_str[..pos].to_string(),
-                        version_str[pos + 1..].to_string(),
-                    )
-                } else {
-                    (version_str.clone(), "1".to_string())
-                };
-
-                let install_time = Self::get_case_insensitive(&info_map, "Install Date")
-                    .and_then(|s| self.parse_pacman_date(s))
-                    .unwrap_or(SystemTime::UNIX_EPOCH);
-
-                let dependencies: Vec<String> = Self::get_case_insensitive(&info_map, "Depends On")
-                    .map(|s| s.split_whitespace().map(String::from).collect())
-                    .unwrap_or_default();
-
-                packages.push(InstalledPackage {
-                    name: name.clone(),
-                    version,
-                    release,
-                    install_time,
-                    description: Self::get_case_insensitive(&info_map, "Description").cloned(),
-                    dependencies,
-                    install_root: self
-                        .isolated_root
-                        .clone()
-                        .unwrap_or_else(|| PathBuf::from("/")),
-                    files: vec![],
-                    manager: PackageManagerType::Pacman,
-                });
             }
         }
 
         Ok(packages)
     }
 
-    fn parse_pacman_date(&self, date_str: &str) -> Option<SystemTime> {
-        let months = [
-            "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-        ];
-
-        let parts: Vec<&str> = date_str.split_whitespace().collect();
-
-        let (year_idx, time_idx, month_idx, day_idx) = if parts.len() == 5 {
-            (4, 3, 1, 2)
-        } else if parts.len() == 6 {
-            (5, 4, 1, 2)
-        } else {
-            return None;
-        };
-
-        let year = parts[year_idx].parse::<u16>().ok()?;
-        let day = parts[day_idx].parse::<u8>().ok()?;
-        let time_parts: Vec<&str> = parts[time_idx].split(':').collect();
-        if time_parts.len() < 3 {
-            return None;
-        }
-        let hour = time_parts[0].parse::<u8>().ok()?;
-        let min = time_parts[1].parse::<u8>().ok()?;
-        let sec = time_parts[2].parse::<u8>().ok()?;
-
-        let month = months
-            .iter()
-            .position(|&m| m == parts[month_idx])
-            .map(|p| p as u8 + 1)?;
-
-        let days: i64 = (year as i64 - 1970) * 365 + (month as i64 - 1) * 30 + day as i64;
-        let seconds: i64 = days * 86400 + hour as i64 * 3600 + min as i64 * 60 + sec as i64;
-        Some(SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(seconds as u64))
-    }
-
     pub fn list_package_files(&self, name: &str) -> Result<Vec<String>> {
-        let output = self.run_pacman_system(&["-Ql", name])?;
-
-        if !output.status.success() {
-            return Err(anyhow::anyhow!("Failed to list files for package {}", name));
+        if let Some(pkg) = self.package_store.get(name)? {
+            Ok(pkg.files.iter().map(|f| f.path.clone()).collect())
+        } else {
+            Ok(vec![])
         }
-
-        let files: Vec<String> = String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .filter_map(|line| {
-                let path = line.split_once(' ').map(|(_, p)| p.to_string());
-                if path.as_ref().map(|p| !p.ends_with('/')).unwrap_or(false) {
-                    path
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        Ok(files)
     }
 
     pub fn scan_package_files(&self, pkg_name: &str, root: &Path) -> Result<Vec<FileEntry>> {
@@ -542,8 +564,9 @@ impl Pacman {
     }
 
     pub fn exists_in_system(&self, name: &str) -> bool {
-        self.run_pacman_system(&["-Q", name])
-            .map(|o| o.status.success())
+        self.package_store
+            .get(name)
+            .map(|p| p.is_some())
             .unwrap_or(false)
     }
 
@@ -552,43 +575,25 @@ impl Pacman {
     }
 
     pub fn search_packages(&self, query: &str) -> Result<Vec<PackageInfo>> {
-        let output = self.run_pacman_system(&["-Ss", query])?;
-
-        if !output.status.success() {
-            return Ok(vec![]);
-        }
-
+        // Search in local package store
+        let packages = self.package_store.list_all()?;
         let mut results = Vec::new();
-        let output_str = String::from_utf8_lossy(&output.stdout);
 
-        for line in output_str.lines() {
-            if line.starts_with("mesg/") || line.starts_with(":: ") {
-                continue;
-            }
-
-            if let Some((repo_pkg, desc)) = line.split_once(" :: ") {
-                let parts: Vec<&str> = repo_pkg.split('/').collect();
-                if parts.len() >= 2 {
-                    let repo = parts[0].to_string();
-                    let name = parts[1].to_string();
-
-                    let version_parts: Vec<&str> = desc.split_whitespace().collect();
-                    let version = version_parts.first().unwrap_or(&"0").to_string();
-
-                    results.push(PackageInfo {
-                        name,
-                        version,
-                        release: "1".to_string(),
-                        description: desc.lines().next().map(String::from),
-                        dependencies: vec![],
-                        optional_deps: vec![],
-                        size: 0,
-                        installed: self.exists_in_system(&parts[1]),
-                        manager: PackageManagerType::Pacman,
-                        build_date: None,
-                        source: PackageSource::Repository(repo),
-                    });
-                }
+        for pkg in packages {
+            if pkg.name.contains(query) {
+                results.push(PackageInfo {
+                    name: pkg.name.clone(),
+                    version: pkg.version.clone(),
+                    release: pkg.release.clone(),
+                    description: None,
+                    dependencies: pkg.dependencies.clone(),
+                    optional_deps: vec![],
+                    size: 0,
+                    installed: true,
+                    manager: PackageManagerType::Pacman,
+                    build_date: None,
+                    source: PackageSource::Repository("local".to_string()),
+                });
             }
         }
 
@@ -596,38 +601,15 @@ impl Pacman {
     }
 
     pub fn get_package_size(&self, name: &str) -> Result<u64> {
-        let output = self.run_pacman_system(&["-Si", name])?;
-
-        if !output.status.success() {
-            return Err(anyhow::anyhow!("Package {} not found", name));
+        // Try to get size from repo database
+        if let Some(info) = self.get_package_info_from_repo_db(name)? {
+            return Ok(info.size);
         }
 
-        let output_str = String::from_utf8_lossy(&output.stdout);
-
-        for line in output_str.lines() {
-            if line.to_lowercase().starts_with("download size") {
-                if let Some(size_str) = line.split_once(':') {
-                    let size_part = size_str.1.trim().to_lowercase();
-                    let size_val: f64 = size_part
-                        .replace("MiB", "")
-                        .replace("KiB", "")
-                        .replace("GiB", "")
-                        .split_whitespace()
-                        .next()
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or(0.0);
-
-                    let multiplier = if size_part.contains("KiB") {
-                        1024.0
-                    } else if size_part.contains("GiB") {
-                        1024.0 * 1024.0 * 1024.0
-                    } else {
-                        1024.0 * 1024.0
-                    };
-
-                    return Ok((size_val * multiplier) as u64);
-                }
-            }
+        // Try to get size from local package store
+        if let Some(pkg) = self.package_store.get(name)? {
+            let total_size: u64 = pkg.files.iter().map(|f| f.size).sum();
+            return Ok(total_size);
         }
 
         Ok(0)

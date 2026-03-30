@@ -16,6 +16,93 @@ use which::which;
 pub const AUR_DB_URL: &str = "https://aur.archlinux.org/cgit/aur.git/plain/PKGBUILD";
 pub const AUR_RPC_URL: &str = "https://aur.archlinux.org/rpc.php";
 
+#[derive(Debug, Clone)]
+pub struct PkgBuildInfo {
+    pub name: String,
+    pub version: String,
+    pub release: String,
+    pub description: Option<String>,
+    pub depends: Vec<String>,
+    pub makedepends: Vec<String>,
+    pub source: Vec<(String, Option<String>)>,
+    pub md5sums: Vec<Option<String>>,
+}
+
+impl PkgBuildInfo {
+    fn parse(content: &str, name: &str) -> Option<Self> {
+        let mut pkgver = String::new();
+        let mut pkgrel = String::new();
+        let mut description = None;
+        let mut depends = Vec::new();
+        let mut makedepends = Vec::new();
+        let mut source = Vec::new();
+        let mut md5sums = Vec::new();
+
+        for line in content.lines() {
+            let line = line.trim();
+            if line.starts_with("pkgver=") {
+                pkgver = line.trim_start_matches("pkgver=").trim().to_string();
+            } else if line.starts_with("pkgrel=") {
+                pkgrel = line.trim_start_matches("pkgrel=").trim().to_string();
+            } else if line.starts_with("pkgdesc=") {
+                let desc = line.trim_start_matches("pkgdesc=").trim();
+                if !desc.starts_with('$') {
+                    description = Some(desc.trim_matches('"').to_string());
+                }
+            } else if line.starts_with("depends=") {
+                let deps = line.trim_start_matches("depends=").trim();
+                depends = Self::parse_array(deps);
+            } else if line.starts_with("makedepends=") {
+                let deps = line.trim_start_matches("makedepends=").trim();
+                makedepends = Self::parse_array(deps);
+            } else if line.starts_with("source=") {
+                let src = line.trim_start_matches("source=").trim();
+                source = Self::parse_array(src)
+                    .into_iter()
+                    .map(|s| {
+                        let url = s.split(':').next().unwrap_or(&s).to_string();
+                        let hash = if s.contains(':') {
+                            s.split(':').nth(1).map(|h| h.to_string())
+                        } else {
+                            None
+                        };
+                        (url, hash)
+                    })
+                    .collect();
+            } else if line.starts_with("md5sums=") {
+                let sums = line.trim_start_matches("md5sums=").trim();
+                md5sums = Self::parse_array(sums)
+                    .into_iter()
+                    .map(|s| if s.is_empty() { None } else { Some(s) })
+                    .collect();
+            }
+        }
+
+        if pkgver.is_empty() {
+            return None;
+        }
+
+        Some(Self {
+            name: name.to_string(),
+            version: pkgver,
+            release: pkgrel,
+            description,
+            depends,
+            makedepends,
+            source,
+            md5sums,
+        })
+    }
+
+    fn parse_array(arr: &str) -> Vec<String> {
+        let arr = arr.trim_start_matches('(').trim_end_matches(')');
+        arr.split_whitespace()
+            .map(|s| s.trim_matches('"').trim_matches('\'').to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum AurHelperType {
     Yay,
@@ -218,7 +305,8 @@ impl AurHelper {
                         || tag.ends_with(&format!("-{}", version))
                     {
                         let pkgbuild = self.fetch_pkgbuild_at_tag(&clone_dir, tag)?;
-                        return self.parse_pkgbuild(&pkgbuild, name);
+                        let info = self.parse_pkgbuild(&pkgbuild, name)?;
+                        return Ok(info.map(|i| self.pkgbuild_to_package_info(&i)));
                     }
                 }
 
@@ -226,7 +314,8 @@ impl AurHelper {
                     let tag = line.trim();
                     if tag.contains(version) {
                         let pkgbuild = self.fetch_pkgbuild_at_tag(&clone_dir, tag)?;
-                        return self.parse_pkgbuild(&pkgbuild, name);
+                        let info = self.parse_pkgbuild(&pkgbuild, name)?;
+                        return Ok(info.map(|i| self.pkgbuild_to_package_info(&i)));
                     }
                 }
             }
@@ -265,9 +354,10 @@ impl AurHelper {
 
             if Self::commit_contains_version(commit_msg, name, version) {
                 let pkgbuild = self.fetch_pkgbuild_at_commit(repo_dir, commit_hash)?;
-                if let Some(mut info) = self.parse_pkgbuild(&pkgbuild, name)? {
+                let info = self.parse_pkgbuild(&pkgbuild, name)?;
+                if let Some(info) = info {
                     if info.version == version {
-                        return Ok(Some(info));
+                        return Ok(Some(self.pkgbuild_to_package_info(&info)));
                     }
                 }
             }
@@ -292,9 +382,10 @@ impl AurHelper {
                 let commit_hash = line.trim();
                 if !commit_hash.is_empty() {
                     let pkgbuild = self.fetch_pkgbuild_at_commit(repo_dir, commit_hash)?;
-                    if let Some(mut info) = self.parse_pkgbuild(&pkgbuild, name)? {
+                    let info = self.parse_pkgbuild(&pkgbuild, name)?;
+                    if let Some(info) = info {
                         if info.version == version {
-                            return Ok(Some(info));
+                            return Ok(Some(self.pkgbuild_to_package_info(&info)));
                         }
                     }
                 }
@@ -356,47 +447,30 @@ impl AurHelper {
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
     }
 
-    fn parse_pkgbuild(&self, content: &str, name: &str) -> Result<Option<PackageInfo>> {
-        let mut pkgver = String::new();
-        let mut pkgrel = String::new();
-        let mut depends: Vec<String> = Vec::new();
+    fn parse_pkgbuild(&self, content: &str, name: &str) -> Result<Option<PkgBuildInfo>> {
+        Ok(PkgBuildInfo::parse(content, name))
+    }
 
-        for line in content.lines() {
-            let line = line.trim();
-            if line.starts_with("pkgver=") {
-                pkgver = line.trim_start_matches("pkgver=").trim().to_string();
-            } else if line.starts_with("pkgrel=") {
-                pkgrel = line.trim_start_matches("pkgrel=").trim().to_string();
-            } else if line.starts_with("depends=") {
-                let deps = line.trim_start_matches("depends=").trim();
-                depends = self.parse_deps_array(deps);
-            } else if line.starts_with("makedepends=") {
-                let deps = line.trim_start_matches("makedepends=").trim();
-                let makedeps: Vec<String> = self.parse_deps_array(deps);
-                depends.extend(makedeps);
-            }
-        }
+    fn pkgbuild_to_package_info(&self, info: &PkgBuildInfo) -> PackageInfo {
+        let mut all_deps = info.depends.clone();
+        all_deps.extend(info.makedepends.clone());
 
-        if pkgver.is_empty() {
-            return Ok(None);
-        }
-
-        Ok(Some(PackageInfo {
-            name: name.to_string(),
-            version: pkgver,
-            release: pkgrel,
-            description: None,
-            dependencies: depends,
+        PackageInfo {
+            name: info.name.clone(),
+            version: info.version.clone(),
+            release: info.release.clone(),
+            description: info.description.clone(),
+            dependencies: all_deps,
             optional_deps: vec![],
             size: 0,
-            installed: self.exists_in_store(name),
+            installed: self.exists_in_store(&info.name),
             manager: match self.helper_type {
                 AurHelperType::Yay => PackageManagerType::Yay,
                 AurHelperType::Paru => PackageManagerType::Paru,
             },
             build_date: None,
             source: PackageSource::Aur,
-        }))
+        }
     }
 
     fn parse_deps_array(&self, deps: &str) -> Vec<String> {
@@ -533,39 +607,181 @@ impl AurHelper {
             rw_paths: vec![],
         });
 
-        let pkg_file = if which("bubblewrap").is_ok() {
-            self.build_in_sandbox(&clone_dir, &sandbox)
-        } else {
-            self.build_direct(&clone_dir)
-        }?;
+        let pkg_file = self.build_direct(&clone_dir)?;
         println!("Successfully built AUR package {}", name);
         Ok(pkg_file)
     }
 
     fn build_direct(&self, pkg_dir: &Path) -> Result<PathBuf> {
-        let status = Command::new("makepkg")
-            .env("LC_ALL", "C")
-            .args(["-s", "--noconfirm"])
-            .current_dir(pkg_dir)
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .status()
-            .context("Failed to build package")?;
+        let pkgbuild_path = pkg_dir.join("PKGBUILD");
+        let content = fs::read_to_string(&pkgbuild_path).context("Failed to read PKGBUILD")?;
 
-        if !status.success() {
-            return Err(anyhow!("Failed to build package"));
+        let pkg_info = PkgBuildInfo::parse(&content, "unknown")
+            .ok_or_else(|| anyhow!("Failed to parse PKGBUILD"))?;
+
+        println!("Building {} v{}...", pkg_info.name, pkg_info.version);
+
+        self.download_sources(pkg_dir, &pkg_info)?;
+
+        let src_dir = pkg_dir.join("src");
+        let _ = fs::remove_dir_all(&src_dir);
+        fs::create_dir_all(&src_dir)?;
+
+        self.extract_sources(&src_dir)?;
+
+        self.run_build(&src_dir, &pkg_dir)?;
+
+        Ok(pkg_dir.join("pkg"))
+    }
+
+    fn download_sources(&self, pkg_dir: &Path, info: &PkgBuildInfo) -> Result<()> {
+        let src_dir = pkg_dir.join("src");
+        let _ = fs::create_dir_all(&src_dir);
+
+        for (i, (url, _hash)) in info.source.iter().enumerate() {
+            if url.is_empty() {
+                continue;
+            }
+
+            let filename = url
+                .split('/')
+                .last()
+                .unwrap_or(&format!("source_{}", i))
+                .to_string();
+
+            let dest = src_dir.join(&filename);
+
+            if dest.exists() {
+                println!("Source {} already exists, skipping", filename);
+                continue;
+            }
+
+            println!("Downloading {}...", filename);
+
+            if url.starts_with("http://") || url.starts_with("https://") {
+                let output = Command::new("curl")
+                    .args(["-L", "-o", dest.to_str().unwrap(), url])
+                    .output()
+                    .context(format!("Failed to download {}", url))?;
+
+                if !output.status.success() {
+                    return Err(anyhow!("Failed to download {}", url));
+                }
+            } else if !url.contains("://") {
+                let src_path = pkg_dir.join(url);
+                if src_path.exists() {
+                    fs::copy(&src_path, &dest).context(format!("Failed to copy {}", url))?;
+                }
+            }
         }
 
-        let pkg_files: Vec<PathBuf> = fs::read_dir(pkg_dir)?
+        Ok(())
+    }
+
+    fn extract_sources(&self, src_dir: &Path) -> Result<()> {
+        let entries = fs::read_dir(src_dir.parent().unwrap())?;
+
+        for entry in entries.filter_map(|e| e.ok()) {
+            let path = entry.path();
+            let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+
+            if filename.ends_with(".tar.gz")
+                || filename.ends_with(".tar.bz2")
+                || filename.ends_with(".tar.xz")
+                || filename.ends_with(".tar.zst")
+                || filename.ends_with(".tgz")
+                || filename.ends_with(".zip")
+            {
+                println!("Extracting {}...", filename);
+
+                let output = if filename.ends_with(".zip") {
+                    Command::new("unzip")
+                        .arg("-o")
+                        .arg(path.to_str().unwrap())
+                        .arg("-d")
+                        .arg(src_dir.to_str().unwrap())
+                        .output()
+                } else {
+                    Command::new("tar")
+                        .args([
+                            "-xf",
+                            path.to_str().unwrap(),
+                            "-C",
+                            src_dir.to_str().unwrap(),
+                        ])
+                        .output()
+                };
+
+                if let Ok(output) = output {
+                    if !output.status.success() {
+                        eprintln!("Warning: Failed to extract {}", filename);
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn run_build(&self, src_dir: &Path, pkg_dir: &Path) -> Result<()> {
+        let entries: Vec<_> = fs::read_dir(src_dir)?
             .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .filter(|p| p.extension().map(|e| e == "zst").unwrap_or(false))
+            .filter(|e| e.path().is_dir())
             .collect();
 
-        pkg_files
-            .into_iter()
-            .next()
-            .ok_or_else(|| anyhow!("No package file produced"))
+        let build_dir = if entries.len() == 1 {
+            entries[0].path()
+        } else {
+            src_dir.to_path_buf()
+        };
+
+        let configure_exists = build_dir.join("configure").exists();
+        let cmakelists_exists = build_dir.join("CMakeLists.txt").exists();
+        let makefile_exists = build_dir.join("Makefile").exists();
+        let meson_build_exists = build_dir.join("meson.build").exists();
+
+        let prefix = pkg_dir.join("pkg");
+        let mut build_cmd = Command::new("bash");
+        build_cmd.arg("-c");
+
+        if configure_exists {
+            build_cmd.arg(&format!(
+                "cd {} && ./configure --prefix={} && make && make install",
+                build_dir.display(),
+                prefix.display()
+            ));
+        } else if cmakelists_exists {
+            build_cmd.arg(&format!(
+                "cd {} && cmake -B build -DCMAKE_INSTALL_PREFIX={} && cmake --build build && cmake --install build",
+                build_dir.display(),
+                prefix.display()
+            ));
+        } else if makefile_exists {
+            build_cmd.arg(&format!(
+                "cd {} && make && DESTDIR={} make install",
+                build_dir.display(),
+                prefix.display()
+            ));
+        } else if meson_build_exists {
+            build_cmd.arg(&format!(
+                "cd {} && meson setup build --prefix={} && meson compile -C build && meson install -C build",
+                build_dir.display(),
+                prefix.display()
+            ));
+        } else {
+            return Err(anyhow!("Cannot determine build system (no configure, CMakeLists.txt, Makefile, or meson.build found)"));
+        }
+
+        build_cmd
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .current_dir(pkg_dir)
+            .spawn()
+            .context("Failed to start build")?
+            .wait()
+            .context("Build failed")?;
+
+        Ok(())
     }
 
     fn extract_package_files(

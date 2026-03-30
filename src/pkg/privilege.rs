@@ -70,10 +70,6 @@ impl PrivilegeManager {
         Ok(cmd)
     }
 
-    pub fn run_pacman(&self, args: &[&str]) -> Result<Command> {
-        self.exec_as_root("pacman", args)
-    }
-
     pub fn run_with_privilege<F>(
         &self,
         mut cmd: Command,
@@ -120,7 +116,7 @@ pub fn check_tool_available(tool: &str) -> Result<String> {
 pub fn check_required_tools() -> Result<Vec<String>> {
     let mut available = Vec::new();
 
-    let tools = ["pacman", "git", "bubblewrap"];
+    let tools = ["git", "bubblewrap"];
 
     for tool in tools {
         if let Ok(path) = check_tool_available(tool) {
@@ -161,11 +157,7 @@ pub fn check_arch_linux() -> Result<()> {
 pub fn verify_build_environment() -> Result<()> {
     check_arch_linux()?;
 
-    let tools = check_required_tools()?;
-
-    if !tools.iter().any(|t| t.starts_with("pacman:")) {
-        return Err(anyhow!("pacman is required but not found"));
-    }
+    let _tools = check_required_tools()?;
 
     Ok(())
 }
