@@ -1,10 +1,10 @@
 use crate::cache::CacheManager;
 use crate::config::Configuration;
-use crate::lock::LockManager;
+use crate::lock::{LockManager, LockTracker};
 use crate::lua::LuaEngine;
 use crate::store::Store;
 use crate::toolchain::ToolchainManager;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use clap::{Parser, Subcommand};
 use nix::unistd::geteuid;
 use std::{
@@ -274,10 +274,19 @@ fn load_config(config_path: PathBuf) -> Result<Configuration> {
 fn build_system(system: Option<String>) -> Result<u64> {
     println!("Building new generation...",);
     let config_path = find_config_file(Some(SYSTEM_CONFIG_PATH))?;
-    let config = load_config(config_path)?;
+    let config = load_config(config_path.clone())?;
     let store_root = get_store_root()?;
     let mut store = Store::new(store_root)?;
-    let id = store.create_generation(config)?;
+
+    let config_dir = config_path
+        .parent()
+        .ok_or_else(|| anyhow!("Invalid config path"))?;
+    let tracker = LockTracker::new(config_dir);
+    let lock_file = tracker.load()?;
+    let Some(lock_file) = lock_file else {
+        return Err(anyhow!("No lock file found.\nRun 'rscm lock' first."));
+    };
+    let id = store.create_generation(config, &lock_file)?;
     println!("New generation id: {}", id);
     Ok(id)
 }

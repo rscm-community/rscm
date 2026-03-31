@@ -13,6 +13,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::config::Configuration;
+use crate::lock::LockFile;
+use crate::pkg::{BuildType, PackageConfig, PackageManagerFactory};
 use crate::store::generation::GenerationManifest;
 
 pub struct Store {
@@ -21,6 +23,7 @@ pub struct Store {
     packages: PackageStore,
     generations: GenerationStore,
     reference: ReferenceCounter,
+    pkg_factory: PackageManagerFactory,
 }
 
 impl Store {
@@ -35,6 +38,7 @@ impl Store {
         let packages = PackageStore::new(root.join("packages"))?;
         let generations = GenerationStore::new(root.join("generations"))?;
         let reference = ReferenceCounter::new(root.join("references.json"))?;
+        let pkg_factory = PackageManagerFactory::new(root.clone());
 
         Ok(Self {
             root,
@@ -42,6 +46,7 @@ impl Store {
             packages,
             generations,
             reference,
+            pkg_factory,
         })
     }
     pub fn register_package(&mut self, pkg: Package) -> Result<()> {
@@ -52,19 +57,58 @@ impl Store {
         Ok(())
     }
 
-    pub fn create_generation(&mut self, configuration: Configuration) -> Result<u64> {
+    pub fn create_generation(
+        &mut self,
+        configuration: Configuration,
+        lock: &LockFile,
+    ) -> Result<u64> {
         let mut files = Vec::new();
-        // for name in configuration.packages.list {
-        // if let Some(pkg) = self.packages.get(name)? {
-        // for file in &pkg.files {
-        // files.push(file.clone());
-        // }
-        // }
-        // }
-        self.generations
-            .create(&[], &files, configuration.environment, |src, dst| {
-                self.content.link_to(src, dst)
-            })
+        let mut package_names = Vec::new();
+
+        for (name, pkg_versions) in &lock.packages {
+            for (version_key, pkg_version) in &pkg_versions.versions {
+                let full_name = format!("{}-{}", name, version_key);
+                package_names.push(full_name.clone());
+
+                if let Some(pkg) = self.packages.get(name)? {
+                    for file in &pkg.files {
+                        files.push(file.clone());
+                    }
+                } else {
+                    println!("Installing package: {} ({})", name, version_key);
+                    let is_aur = pkg_versions.source == "aur";
+                    let build_type = if is_aur {
+                        BuildType::Aur
+                    } else {
+                        BuildType::Pacman
+                    };
+
+                    let config = PackageConfig {
+                        name: name.clone(),
+                        version: Some(version_key.clone()),
+                        build_type,
+                        dependencies: pkg_version.dependencies.clone(),
+                        sandbox_config: None,
+                    };
+
+                    let manager = self.pkg_factory.for_package(&config)?;
+                    let info = manager.install(&config, false)?;
+
+                    if let Some(pkg) = self.packages.get(name)? {
+                        for file in &pkg.files {
+                            files.push(file.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        self.generations.create(
+            &package_names,
+            &files,
+            configuration.environment,
+            |src, dst| self.content.link_to(src, dst),
+        )
     }
 
     pub fn activate_generation(&self, id: u64) -> Result<()> {
