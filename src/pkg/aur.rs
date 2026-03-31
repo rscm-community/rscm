@@ -1,9 +1,9 @@
 use super::{
-    BuildType, InstalledPackage, PackageConfig, PackageInfo, PackageManager, PackageManagerType,
-    PackageSource, SandboxConfig,
+    BuildType, InstalledPackage, PackageConfig, PackageInfo, PackageManager, PackageSource,
+    PackageType, SandboxConfig,
 };
 use crate::store::package::FileEntry;
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::Read;
@@ -30,6 +30,7 @@ pub struct PkgBuildInfo {
 
 impl PkgBuildInfo {
     fn parse(content: &str, name: &str) -> Option<Self> {
+        let mut pkgname = name.to_string();
         let mut pkgver = String::new();
         let mut pkgrel = String::new();
         let mut description = None;
@@ -40,14 +41,28 @@ impl PkgBuildInfo {
 
         for line in content.lines() {
             let line = line.trim();
-            if line.starts_with("pkgver=") {
-                pkgver = line.trim_start_matches("pkgver=").trim().to_string();
+            if line.starts_with("pkgname=") {
+                pkgname = line
+                    .trim_start_matches("pkgname=")
+                    .trim()
+                    .trim_matches('\'')
+                    .to_string();
+            } else if line.starts_with("pkgver=") {
+                pkgver = line
+                    .trim_start_matches("pkgver=")
+                    .trim()
+                    .trim_matches('\'')
+                    .to_string();
             } else if line.starts_with("pkgrel=") {
-                pkgrel = line.trim_start_matches("pkgrel=").trim().to_string();
+                pkgrel = line
+                    .trim_start_matches("pkgrel=")
+                    .trim()
+                    .trim_matches('\'')
+                    .to_string();
             } else if line.starts_with("pkgdesc=") {
                 let desc = line.trim_start_matches("pkgdesc=").trim();
                 if !desc.starts_with('$') {
-                    description = Some(desc.trim_matches('"').to_string());
+                    description = Some(desc.trim_matches('"').trim_matches('\'').to_string());
                 }
             } else if line.starts_with("depends=") {
                 let deps = line.trim_start_matches("depends=").trim();
@@ -60,13 +75,13 @@ impl PkgBuildInfo {
                 source = Self::parse_array(src)
                     .into_iter()
                     .map(|s| {
-                        let url = s.split(':').next().unwrap_or(&s).to_string();
-                        let hash = if s.contains(':') {
-                            s.split(':').nth(1).map(|h| h.to_string())
+                        let s = Self::expand_variables(&s, &pkgname, &pkgver);
+                        if s.starts_with("git+") {
+                            let url = s.strip_prefix("git+").unwrap_or(&s).to_string();
+                            (url, Some("git".to_string()))
                         } else {
-                            None
-                        };
-                        (url, hash)
+                            (s, None)
+                        }
                     })
                     .collect();
             } else if line.starts_with("md5sums=") {
@@ -83,7 +98,7 @@ impl PkgBuildInfo {
         }
 
         Some(Self {
-            name: name.to_string(),
+            name: pkgname,
             version: pkgver,
             release: pkgrel,
             description,
@@ -101,36 +116,19 @@ impl PkgBuildInfo {
             .filter(|s| !s.is_empty())
             .collect()
     }
-}
 
-#[derive(Debug, Clone, Copy)]
-pub enum AurHelperType {
-    Yay,
-    Paru,
-}
-
-impl AurHelperType {
-    pub fn binary_name(&self) -> &'static str {
-        match self {
-            AurHelperType::Yay => "yay",
-            AurHelperType::Paru => "paru",
-        }
-    }
-
-    pub fn detect() -> Option<Self> {
-        if which("paru").is_ok() {
-            return Some(AurHelperType::Paru);
-        }
-        if which("yay").is_ok() {
-            return Some(AurHelperType::Yay);
-        }
-        None
+    fn expand_variables(s: &str, pkgname: &str, pkgver: &str) -> String {
+        s.replace("$pkgname", pkgname)
+            .replace("${pkgname}", pkgname)
+            .replace("$pkgver", pkgver)
+            .replace("${pkgver}", pkgver)
+            .replace("$url", "")
+            .replace("${url}", "")
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct AurHelper {
-    helper_type: AurHelperType,
     build_dir: PathBuf,
     pkg_dest: PathBuf,
     cache_dir: PathBuf,
@@ -138,17 +136,11 @@ pub struct AurHelper {
 }
 
 impl AurHelper {
-    pub fn new(
-        helper_type: AurHelperType,
-        build_dir: PathBuf,
-        pkg_dest: PathBuf,
-        store_root: PathBuf,
-    ) -> Self {
+    pub fn new(build_dir: PathBuf, pkg_dest: PathBuf, store_root: PathBuf) -> Self {
         let cache_dir = store_root.join("cache/aur");
         let _ = fs::create_dir_all(&cache_dir);
 
         Self {
-            helper_type,
             build_dir,
             pkg_dest,
             cache_dir,
@@ -157,8 +149,6 @@ impl AurHelper {
     }
 
     pub fn detect(store_root: PathBuf) -> Option<Self> {
-        let helper_type = AurHelperType::detect()?;
-
         let build_dir = dirs::cache_dir()
             .unwrap_or_else(|| PathBuf::from("/tmp"))
             .join("rscm")
@@ -169,11 +159,7 @@ impl AurHelper {
             .join("rscm")
             .join("aur-packages");
 
-        Some(Self::new(helper_type, build_dir, pkg_dest, store_root))
-    }
-
-    pub fn helper_type(&self) -> AurHelperType {
-        self.helper_type
+        Some(Self::new(build_dir, pkg_dest, store_root))
     }
 
     pub fn build_dir(&self) -> &PathBuf {
@@ -254,10 +240,7 @@ impl AurHelper {
             optional_deps: vec![],
             size: 0,
             installed: self.exists_in_store(name),
-            manager: match self.helper_type {
-                AurHelperType::Yay => PackageManagerType::Yay,
-                AurHelperType::Paru => PackageManagerType::Paru,
-            },
+            ty: PackageType::Aur,
             build_date: None,
             source: PackageSource::Aur,
         }))
@@ -464,10 +447,7 @@ impl AurHelper {
             optional_deps: vec![],
             size: 0,
             installed: self.exists_in_store(&info.name),
-            manager: match self.helper_type {
-                AurHelperType::Yay => PackageManagerType::Yay,
-                AurHelperType::Paru => PackageManagerType::Paru,
-            },
+            ty: PackageType::Aur,
             build_date: None,
             source: PackageSource::Aur,
         }
@@ -556,6 +536,8 @@ impl AurHelper {
             bwrap_cmd.arg("--bind").arg(path).arg(path);
         }
 
+        let pkgbuild_script = self.generate_pkgbuild_script(pkg_dir)?;
+
         bwrap_cmd
             .arg("--tmpfs")
             .arg("/tmp")
@@ -565,7 +547,7 @@ impl AurHelper {
             .arg("/build")
             .arg("/bin/bash")
             .arg("-c")
-            .arg(&format!("makepkg -s --noconfirm && ls *.pkg.tar.zst"));
+            .arg(&pkgbuild_script);
 
         let output = bwrap_cmd
             .current_dir(pkg_dir)
@@ -580,13 +562,8 @@ impl AurHelper {
             ));
         }
 
-        let pkg_file = String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .find(|l| l.ends_with(".pkg.tar.zst"))
-            .ok_or_else(|| anyhow!("No package file produced"))?
-            .to_string();
-
-        Ok(PathBuf::from(pkg_file))
+        let pkg_file = self.find_built_package(pkg_dir)?;
+        Ok(pkg_file)
     }
 
     pub fn build_package(
@@ -629,15 +606,12 @@ impl AurHelper {
 
         self.extract_sources(&src_dir)?;
 
-        self.run_build(&src_dir, &pkg_dir)?;
+        self.run_pkgbuild_functions(pkg_dir)?;
 
-        Ok(pkg_dir.join("pkg"))
+        self.find_built_package(pkg_dir)
     }
 
     fn download_sources(&self, pkg_dir: &Path, info: &PkgBuildInfo) -> Result<()> {
-        let src_dir = pkg_dir.join("src");
-        let _ = fs::create_dir_all(&src_dir);
-
         for (i, (url, _hash)) in info.source.iter().enumerate() {
             if url.is_empty() {
                 continue;
@@ -649,7 +623,7 @@ impl AurHelper {
                 .unwrap_or(&format!("source_{}", i))
                 .to_string();
 
-            let dest = src_dir.join(&filename);
+            let dest = pkg_dir.join(&filename);
 
             if dest.exists() {
                 println!("Source {} already exists, skipping", filename);
@@ -723,6 +697,132 @@ impl AurHelper {
         Ok(())
     }
 
+    fn generate_pkgbuild_script(&self, pkg_dir: &Path) -> Result<String> {
+        let pkgbuild_path = pkg_dir.join("PKGBUILD");
+        let content = fs::read_to_string(&pkgbuild_path).context("Failed to read PKGBUILD")?;
+
+        let mut script = String::new();
+        script.push_str("set -e\n");
+        script.push_str("export PKGDEST=$(pwd)\n");
+        script.push_str("export SRCDEST=$(pwd)/src\n");
+        script.push_str("export LOGDEST=$(pwd)/logs\n");
+        script.push_str("mkdir -p \"$SRCDEST\" \"$LOGDEST\"\n");
+
+        script.push_str("source PKGBUILD\n");
+
+        script.push_str("if declare -f prepare >/dev/null 2>&1; then\n");
+        script.push_str("  echo 'Running prepare()...'\n");
+        script.push_str("  prepare\n");
+        script.push_str("fi\n");
+
+        script.push_str("if declare -f build >/dev/null 2>&1; then\n");
+        script.push_str("  echo 'Running build()...'\n");
+        script.push_str("  build\n");
+        script.push_str("fi\n");
+
+        script.push_str("if declare -f package >/dev/null 2>&1; then\n");
+        script.push_str("  echo 'Running package()...'\n");
+        script.push_str("  export pkgdir=$(pwd)/pkg\n");
+        script.push_str("  mkdir -p \"$pkgdir\"\n");
+        script.push_str("  package\n");
+        script.push_str("fi\n");
+
+        script.push_str("echo 'Build completed successfully'\n");
+
+        Ok(script)
+    }
+
+    fn run_pkgbuild_functions(&self, pkg_dir: &Path) -> Result<()> {
+        let pkgbuild_path = pkg_dir.join("PKGBUILD");
+        let content = fs::read_to_string(&pkgbuild_path).context("Failed to read PKGBUILD")?;
+
+        let src_dir = pkg_dir.join("src");
+        let build_dir = if src_dir.exists() {
+            let entries: Vec<_> = fs::read_dir(&src_dir)?
+                .filter_map(|e| e.ok())
+                .filter(|e| e.path().is_dir())
+                .collect();
+            if entries.len() == 1 {
+                entries[0].path()
+            } else {
+                src_dir.clone()
+            }
+        } else {
+            pkg_dir.to_path_buf()
+        };
+
+        let mut script = String::new();
+        script.push_str("set -e\n");
+        script.push_str(&format!("cd {}\n", pkg_dir.display()));
+        script.push_str("export PKGDEST=$(pwd)\n");
+        script.push_str("export SRCDEST=$(pwd)/src\n");
+        script.push_str("export LOGDEST=$(pwd)/logs\n");
+        script.push_str("mkdir -p \"$SRCDEST\" \"$LOGDEST\"\n");
+
+        script.push_str("source PKGBUILD\n");
+
+        script.push_str("if declare -f prepare >/dev/null 2>&1; then\n");
+        script.push_str("  echo 'Running prepare()...'\n");
+        script.push_str(&format!("  cd {}\n", src_dir.display()));
+        script.push_str("  prepare\n");
+        script.push_str(&format!("  cd {}\n", pkg_dir.display()));
+        script.push_str("fi\n");
+
+        script.push_str("if declare -f build >/dev/null 2>&1; then\n");
+        script.push_str("  echo 'Running build()...'\n");
+        script.push_str(&format!("  cd {}\n", src_dir.display()));
+        script.push_str("  build\n");
+        script.push_str(&format!("  cd {}\n", pkg_dir.display()));
+        script.push_str("fi\n");
+
+        script.push_str("if declare -f package >/dev/null 2>&1; then\n");
+        script.push_str("  echo 'Running package()...'\n");
+        script.push_str("  export pkgdir=$(pwd)/pkg\n");
+        script.push_str("  mkdir -p \"$pkgdir\"\n");
+        script.push_str(&format!("  cd {}\n", src_dir.display()));
+        script.push_str("  package\n");
+        script.push_str("fi\n");
+
+        script.push_str("echo 'Build completed successfully'\n");
+
+        let output = Command::new("bash")
+            .arg("-c")
+            .arg(&script)
+            .current_dir(pkg_dir)
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .output()
+            .context("Failed to execute PKGBUILD functions")?;
+
+        if !output.status.success() {
+            return Err(anyhow!(
+                "PKGBUILD execution failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+
+        Ok(())
+    }
+
+    fn find_built_package(&self, pkg_dir: &Path) -> Result<PathBuf> {
+        let entries = fs::read_dir(pkg_dir)?;
+        for entry in entries.filter_map(|e| e.ok()) {
+            let path = entry.path();
+            if let Some(ext) = path.extension() {
+                if ext == "zst" && path.to_string_lossy().contains(".pkg.tar.") {
+                    return Ok(path);
+                }
+            }
+        }
+
+        let pkg_subdir = pkg_dir.join("pkg");
+        if pkg_subdir.exists() {
+            return Ok(pkg_subdir);
+        }
+
+        Err(anyhow!("No built package found in {}", pkg_dir.display()))
+    }
+
     fn run_build(&self, src_dir: &Path, pkg_dir: &Path) -> Result<()> {
         let entries: Vec<_> = fs::read_dir(src_dir)?
             .filter_map(|e| e.ok())
@@ -769,7 +869,9 @@ impl AurHelper {
                 prefix.display()
             ));
         } else {
-            return Err(anyhow!("Cannot determine build system (no configure, CMakeLists.txt, Makefile, or meson.build found)"));
+            return Err(anyhow!(
+                "Cannot determine build system (no configure, CMakeLists.txt, Makefile, or meson.build found)"
+            ));
         }
 
         build_cmd
@@ -879,6 +981,62 @@ impl AurHelper {
         }
 
         Ok(dependents)
+    }
+
+    fn copy_directory_contents(&self, src_dir: &Path, dst_dir: &Path) -> Result<Vec<FileEntry>> {
+        let mut files = Vec::new();
+        self.copy_dir_recursive_with_entries(src_dir, dst_dir, &mut files, src_dir)?;
+        Ok(files)
+    }
+
+    fn copy_dir_recursive_with_entries(
+        &self,
+        src: &Path,
+        dst: &Path,
+        files: &mut Vec<FileEntry>,
+        base_dir: &Path,
+    ) -> Result<()> {
+        fs::create_dir_all(dst)?;
+
+        for entry in fs::read_dir(src)? {
+            let entry = entry?;
+            let src_path = entry.path();
+            let dst_path = dst.join(entry.file_name());
+
+            if src_path.is_dir() {
+                self.copy_dir_recursive_with_entries(&src_path, &dst_path, files, base_dir)?;
+            } else {
+                fs::copy(&src_path, &dst_path)?;
+
+                if let Ok(metadata) = fs::metadata(&dst_path) {
+                    let hash = self.compute_hash_for_path(&dst_path)?;
+                    let mode = metadata.permissions().mode() & 0o7777;
+                    let symlink_target = if metadata.file_type().is_symlink() {
+                        fs::read_link(&dst_path)
+                            .ok()
+                            .map(|p| p.to_string_lossy().to_string())
+                    } else {
+                        None
+                    };
+
+                    let relative_path = dst_path
+                        .strip_prefix(base_dir)
+                        .unwrap_or(&dst_path)
+                        .to_string_lossy()
+                        .to_string();
+
+                    files.push(FileEntry {
+                        path: relative_path,
+                        hash,
+                        size: metadata.len(),
+                        mode,
+                        symlink_target,
+                    });
+                }
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -1067,7 +1225,7 @@ impl PackageManager for AurHelper {
         }
 
         let sandbox = package.sandbox_config.as_ref();
-        let pkg_file = self.build_package(&package.name, sandbox)?;
+        let build_output = self.build_package(&package.name, sandbox)?;
 
         let mut info = self
             .get_aur_info(&package.name, package.version.as_deref())?
@@ -1087,7 +1245,17 @@ impl PackageManager for AurHelper {
         ));
         fs::create_dir_all(&store_pkg_dir)?;
 
-        let files = self.extract_package_files(&pkg_file, &store_pkg_dir)?;
+        let files =
+            if build_output.is_file() && build_output.to_string_lossy().ends_with(".pkg.tar.zst") {
+                self.extract_package_files(&build_output, &store_pkg_dir)?
+            } else if build_output.is_dir() {
+                self.copy_directory_contents(&build_output, &store_pkg_dir)?
+            } else {
+                return Err(anyhow!(
+                    "Build output is neither a package file nor a directory: {}",
+                    build_output.display()
+                ));
+            };
 
         let pkg = crate::store::Package {
             name: info.name.clone(),
@@ -1104,8 +1272,7 @@ impl PackageManager for AurHelper {
         info.installed = true;
         info.source = PackageSource::Aur;
 
-        self.query_package_info(&package.name, package.version.as_deref())
-            .and_then(|info| info.ok_or_else(|| anyhow!("Package not found after install")))
+        Ok(info)
     }
 
     fn remove(
@@ -1227,10 +1394,7 @@ impl PackageManager for AurHelper {
                                 dependencies: pkg.dependencies.clone(),
                                 install_root: PathBuf::from("/"),
                                 files: pkg.files.iter().map(|f| f.path.clone()).collect(),
-                                manager: match self.helper_type {
-                                    AurHelperType::Yay => PackageManagerType::Yay,
-                                    AurHelperType::Paru => PackageManagerType::Paru,
-                                },
+                                ty: PackageType::Aur,
                             });
                         }
                     }
@@ -1246,7 +1410,7 @@ impl PackageManager for AurHelper {
     }
 
     fn manager_name(&self) -> &'static str {
-        self.helper_type.binary_name()
+        "aur"
     }
 }
 

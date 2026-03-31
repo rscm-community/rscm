@@ -82,14 +82,13 @@ pub struct InstalledPackage {
     pub dependencies: Vec<String>,
     pub install_root: PathBuf,
     pub files: Vec<String>,
-    pub manager: PackageManagerType,
+    pub ty: PackageType,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum PackageManagerType {
+pub enum PackageType {
     Pacman,
-    Yay,
-    Paru,
+    Aur,
     Other(String),
 }
 
@@ -120,7 +119,7 @@ pub struct PackageInfo {
     pub optional_deps: Vec<String>,
     pub size: u64,
     pub installed: bool,
-    pub manager: PackageManagerType,
+    pub ty: PackageType,
     pub build_date: Option<SystemTime>,
     pub source: PackageSource,
 }
@@ -152,8 +151,8 @@ impl PackageInfo {
     pub fn is_aur(&self) -> bool {
         matches!(self.source, PackageSource::Aur)
             || matches!(
-                self.manager,
-                PackageManagerType::Yay | PackageManagerType::Paru
+                self.ty,
+                PackageType::Aur
             )
     }
 }
@@ -223,7 +222,6 @@ impl PackageManagerFactory {
         let pacman = Pacman::new(store_root.clone());
         let aur_helper = AurHelper::detect(store_root.clone()).map(|helper| {
             AurHelper::new(
-                helper.helper_type(),
                 helper.build_dir().clone(),
                 helper.pkg_dest().clone(),
                 store_root,
@@ -256,11 +254,5 @@ impl PackageManagerFactory {
 
     pub fn has_aur_helper(&self) -> bool {
         self.aur_helper.is_some()
-    }
-
-    pub fn aur_helper_type(&self) -> Option<&str> {
-        self.aur_helper
-            .as_ref()
-            .map(|h| h.helper_type().binary_name())
     }
 }

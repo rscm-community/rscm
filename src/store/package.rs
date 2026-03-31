@@ -34,33 +34,89 @@ impl PackageStore {
         fs::create_dir_all(&root)?;
         Ok(Self { root })
     }
+
     pub fn save(&self, pkg: &Package) -> Result<()> {
-        let path = self.package_path(&pkg.name, &pkg.version, &pkg.release);
-        let json = serde_json::to_string_pretty(pkg)?;
-        fs::write(path, json)?;
+        let dir_name = format!("{}-{}-{}", pkg.name, pkg.version, pkg.release);
+        let dir_path = self.root.join(&dir_name);
+        fs::create_dir_all(&dir_path)?;
+
+        let manifest_path = dir_path.join("manifest.toml");
+        let content = toml::to_string_pretty(pkg)?;
+        fs::write(manifest_path, content)?;
         Ok(())
     }
+
     pub fn get(&self, name: &str) -> Result<Option<Package>> {
-        let pattern = self.root.join(format!("{}*.json", name));
-        let mut entries: Vec<_> = glob::glob(pattern.to_str().unwrap())?
-            .filter_map(Result::ok)
-            .collect();
-        if entries.is_empty() {
+        self.get_version(name, None)
+    }
+
+    pub fn get_version(&self, name: &str, version: Option<&str>) -> Result<Option<Package>> {
+        let mut matching_dirs: Vec<PathBuf> = Vec::new();
+
+        if !self.root.exists() {
             return Ok(None);
         }
-        entries.sort();
-        let latest = entries.last().unwrap();
-        let content = fs::read_to_string(latest)?;
-        let pkg = serde_json::from_str(&content)?;
-        Ok(Some(pkg))
-    }
-    pub fn list(&self) -> Result<Vec<String>> {
-        let mut packages = Vec::new();
+
         for entry in fs::read_dir(&self.root)? {
             let entry = entry?;
             let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) == Some("json") {
-                if let Some(name) = path.file_stem().and_then(|n| n.to_str()) {
+
+            if !path.is_dir() {
+                continue;
+            }
+
+            let dir_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+
+            if !dir_name.starts_with(&format!("{}-", name)) {
+                continue;
+            }
+
+            if let Some(ver) = version {
+                let expected_prefix = format!("{}-{}-", name, ver);
+                if !dir_name.starts_with(&expected_prefix) {
+                    continue;
+                }
+            }
+
+            matching_dirs.push(path);
+        }
+
+        if matching_dirs.is_empty() {
+            return Ok(None);
+        }
+
+        matching_dirs.sort();
+
+        for dir in matching_dirs.iter().rev() {
+            let manifest_path = dir.join("manifest.toml");
+            if manifest_path.exists() {
+                let content = fs::read_to_string(&manifest_path)?;
+                let pkg: Package = toml::from_str(&content)?;
+                return Ok(Some(pkg));
+            }
+        }
+
+        Ok(None)
+    }
+
+    pub fn list(&self) -> Result<Vec<String>> {
+        let mut packages = Vec::new();
+        if !self.root.exists() {
+            return Ok(packages);
+        }
+
+        for entry in fs::read_dir(&self.root)? {
+            let entry = entry?;
+            let path = entry.path();
+
+            if !path.is_dir() {
+                continue;
+            }
+
+            let dir_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+
+            if let Some(name) = dir_name.split('-').next() {
+                if !packages.contains(&name.to_string()) {
                     packages.push(name.to_string());
                 }
             }
@@ -70,12 +126,22 @@ impl PackageStore {
 
     pub fn list_all(&self) -> Result<Vec<Package>> {
         let mut packages = Vec::new();
+        if !self.root.exists() {
+            return Ok(packages);
+        }
+
         for entry in fs::read_dir(&self.root)? {
             let entry = entry?;
             let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) == Some("json") {
-                if let Ok(content) = fs::read_to_string(&path) {
-                    if let Ok(pkg) = serde_json::from_str::<Package>(&content) {
+
+            if !path.is_dir() {
+                continue;
+            }
+
+            let manifest_path = path.join("manifest.toml");
+            if manifest_path.exists() {
+                if let Ok(content) = fs::read_to_string(&manifest_path) {
+                    if let Ok(pkg) = toml::from_str::<Package>(&content) {
                         packages.push(pkg);
                     }
                 }
@@ -84,8 +150,74 @@ impl PackageStore {
         Ok(packages)
     }
 
-    fn package_path(&self, name: &str, version: &str, release: &str) -> PathBuf {
-        self.root
-            .join(format!("{}-{}-{}.json", name, version, release))
+    pub fn list_versions(&self, name: &str) -> Result<Vec<Package>> {
+        let mut packages = Vec::new();
+        if !self.root.exists() {
+            return Ok(packages);
+        }
+
+        for entry in fs::read_dir(&self.root)? {
+            let entry = entry?;
+            let path = entry.path();
+
+            if !path.is_dir() {
+                continue;
+            }
+
+            let dir_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+
+            if !dir_name.starts_with(&format!("{}-", name)) {
+                continue;
+            }
+
+            let manifest_path = path.join("manifest.toml");
+            if manifest_path.exists() {
+                if let Ok(content) = fs::read_to_string(&manifest_path) {
+                    if let Ok(pkg) = toml::from_str::<Package>(&content) {
+                        packages.push(pkg);
+                    }
+                }
+            }
+        }
+        Ok(packages)
+    }
+
+    pub fn contains(&self, name: &str) -> Result<bool> {
+        Ok(self.get(name)?.is_some())
+    }
+
+    pub fn remove(&self, name: &str, version: Option<&str>) -> Result<bool> {
+        let mut removed = false;
+
+        if !self.root.exists() {
+            return Ok(false);
+        }
+
+        for entry in fs::read_dir(&self.root)? {
+            let entry = entry?;
+            let path = entry.path();
+
+            if !path.is_dir() {
+                continue;
+            }
+
+            let dir_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+
+            if !dir_name.starts_with(&format!("{}-", name)) {
+                continue;
+            }
+
+            if let Some(ver) = version {
+                let expected_prefix = format!("{}-{}-", name, ver);
+                if !dir_name.starts_with(&expected_prefix) {
+                    continue;
+                }
+            }
+
+            fs::remove_dir_all(&path)?;
+            removed = true;
+        }
+
+        Ok(removed)
     }
 }

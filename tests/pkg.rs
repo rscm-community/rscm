@@ -1,10 +1,11 @@
 use anyhow::Result;
 use rscm::pkg::{
-    BuildType, PackageConfig, PackageManager, PackageManagerFactory, PackageManagerType,
+    BuildType, PackageConfig, PackageManager, PackageManagerFactory, PackageType,
     PackageSource, RemoveResult, SandboxConfig, aur::AurHelper, lock::GlobalLock, pacman::Pacman,
 };
 use std::fs;
 use tempfile::tempdir;
+use std::path::PathBuf;
 
 mod global_lock_tests {
     use super::*;
@@ -234,18 +235,6 @@ mod package_source_tests {
     }
 }
 
-mod package_manager_type_tests {
-    use super::*;
-    #[test]
-    fn test_package_manager_type_equality() -> Result<()> {
-        assert_eq!(PackageManagerType::Pacman, PackageManagerType::Pacman);
-        assert_eq!(PackageManagerType::Yay, PackageManagerType::Yay);
-        assert_eq!(PackageManagerType::Paru, PackageManagerType::Paru);
-        assert_ne!(PackageManagerType::Pacman, PackageManagerType::Yay);
-        Ok(())
-    }
-}
-
 mod integration_tests {
     use super::*;
     #[test]
@@ -269,21 +258,6 @@ mod integration_tests {
             assert_eq!(info.name, "base");
             assert!(info.installed);
             assert!(matches!(info.source, PackageSource::Repository(_)));
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn test_factory_aur_helper_detection() -> Result<()> {
-        let dir = tempdir()?;
-        let store_root = dir.path().join("store");
-        fs::create_dir_all(&store_root)?;
-
-        let factory = PackageManagerFactory::new(store_root);
-        let aur_type = factory.aur_helper_type();
-
-        if let Some(aur_type) = aur_type {
-            assert!(aur_type == "yay" || aur_type == "paru");
         }
         Ok(())
     }
@@ -370,7 +344,6 @@ mod aur_helper_tests {
         fs::create_dir_all(&store_root)?;
 
         if let Some(aur) = AurHelper::detect(store_root.clone()) {
-            assert_eq!(aur.manager_name(), aur.helper_type().binary_name());
             assert_eq!(aur.build_type(), BuildType::Aur);
         }
         Ok(())
@@ -414,7 +387,7 @@ mod pacman_install_tests {
             Ok(info) => {
                 assert_eq!(info.name, "base");
                 assert!(info.installed);
-                assert_eq!(info.manager, PackageManagerType::Pacman);
+                assert_eq!(info.ty, PackageType::Pacman);
 
                 let package_store = PackageStore::new(store_root.join("packages"))?;
                 let pkg = package_store.get("base")?;
@@ -575,7 +548,7 @@ mod aur_install_tests {
             Ok(info) => {
                 assert_eq!(info.name, "hello");
                 assert!(info.installed);
-                assert_eq!(info.manager, PackageManagerType::Yay);
+                assert_eq!(info.ty, PackageType::Aur);
 
                 let package_store = PackageStore::new(store_root.join("packages"))?;
                 let pkg = package_store.get("hello")?;

@@ -1,6 +1,6 @@
 use super::{
-    BuildType, InstalledPackage, PackageConfig, PackageInfo, PackageManager, PackageManagerType,
-    PackageSource,
+    BuildType, InstalledPackage, PackageConfig, PackageInfo, PackageManager, PackageSource,
+    PackageType,
 };
 use crate::pkg::privilege::PrivilegeManager;
 use crate::store::package::FileEntry;
@@ -223,7 +223,7 @@ impl Pacman {
             optional_deps,
             size,
             installed: self.exists_in_db(package_name),
-            manager: PackageManagerType::Pacman,
+            ty: PackageType::Pacman,
             build_date: None,
             source: PackageSource::Repository("core".to_string()),
         }))
@@ -376,7 +376,7 @@ impl Pacman {
                 optional_deps: vec![],
                 size: 0,
                 installed: true,
-                manager: PackageManagerType::Pacman,
+                ty: PackageType::Pacman,
                 build_date: None,
                 source: PackageSource::Repository("local".to_string()),
             }))
@@ -428,7 +428,7 @@ impl Pacman {
                                         .clone()
                                         .unwrap_or_else(|| PathBuf::from("/")),
                                     files,
-                                    manager: PackageManagerType::Pacman,
+                                    ty: PackageType::Pacman,
                                 });
                             }
                         }
@@ -555,7 +555,7 @@ impl Pacman {
                     dependencies: info.dependencies,
                     install_root: target_root.to_path_buf(),
                     files: vec![],
-                    manager: PackageManagerType::Pacman,
+                    ty: PackageType::Pacman,
                 });
             }
         }
@@ -590,7 +590,7 @@ impl Pacman {
                     optional_deps: vec![],
                     size: 0,
                     installed: true,
-                    manager: PackageManagerType::Pacman,
+                    ty: PackageType::Pacman,
                     build_date: None,
                     source: PackageSource::Repository("local".to_string()),
                 });
@@ -765,7 +765,7 @@ impl Pacman {
                     optional_deps: pkg_info.optional_deps,
                     size: pkg_info.size,
                     installed: true,
-                    manager: PackageManagerType::Pacman,
+                    ty: PackageType::Pacman,
                     build_date: pkg_info.build_date,
                     source: PackageSource::Repository("archive".to_string()),
                 });
@@ -949,7 +949,7 @@ impl Pacman {
             optional_deps: pkg_info.optional_deps,
             size: pkg_info.size,
             installed: true,
-            manager: PackageManagerType::Pacman,
+            ty: PackageType::Pacman,
             build_date: pkg_info.build_date,
             source: PackageSource::Repository("archive".to_string()),
         })
@@ -1160,7 +1160,7 @@ impl Pacman {
             optional_deps,
             size: file_size,
             installed: false,
-            manager: PackageManagerType::Pacman,
+            ty: PackageType::Pacman,
             build_date: None,
             source: PackageSource::Repository("archive".to_string()),
         })
