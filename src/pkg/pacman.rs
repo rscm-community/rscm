@@ -19,6 +19,7 @@ const PACMAN_DB_PATH: &str = "/var/lib/pacman";
 const ARCHIVE_URL: &str = "https://archive.archlinux.org";
 const MIRROR_URL: &str = "https://geo.mirror.pkgbuild.com";
 const REPOS: &[&str] = &["core", "extra", "multilib"];
+const ARCH: &str = "x86_64";
 
 #[derive(Debug, Clone)]
 pub struct Pacman {
@@ -99,7 +100,6 @@ impl Pacman {
         let db_filename = format!("{}.db", repo);
         let db_path = self.repo_db_cache_dir.join(&db_filename);
 
-        // Check if cache is fresh (less than 1 hour old)
         if db_path.exists() {
             if let Ok(metadata) = fs::metadata(&db_path) {
                 if let Ok(modified) = metadata.modified() {
@@ -110,7 +110,7 @@ impl Pacman {
             }
         }
 
-        let url = format!("{}/{}", MIRROR_URL, db_filename);
+        let url = format!("{}/{}/os/{}/{}", MIRROR_URL, repo, ARCH, db_filename);
         let client = reqwest::blocking::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()?;
@@ -134,30 +134,55 @@ impl Pacman {
     }
 
     fn parse_repo_db(&self, db_path: &Path, package_name: &str) -> Result<Option<PackageInfo>> {
-        let file = File::open(db_path)?;
+        let mut raw_content = Vec::new();
+        File::open(db_path)?.read_to_end(&mut raw_content)?;
+
         let decompressed: Box<dyn Read> = if db_path.to_string_lossy().ends_with(".zst") {
-            let decoder = zstd::stream::Decoder::new(file)?;
+            let decoder = zstd::stream::Decoder::new(raw_content.as_slice())?;
             Box::new(std::io::BufReader::new(decoder))
         } else if db_path.to_string_lossy().ends_with(".gz") {
-            let decoder = flate2::read::GzDecoder::new(file);
+            let decoder = flate2::read::GzDecoder::new(raw_content.as_slice());
             Box::new(decoder)
         } else {
-            Box::new(file)
+            // gzip
+            if raw_content.len() >= 2 && raw_content[0] == 0x1f && raw_content[1] == 0x8b {
+                let decoder = flate2::read::GzDecoder::new(raw_content.as_slice());
+                Box::new(decoder)
+            } else {
+                // zstd
+                if raw_content.len() >= 4
+                    && raw_content[0] == 0xFD
+                    && raw_content[1] == 0x2F
+                    && raw_content[2] == 0xB5
+                    && raw_content[3] == 0x28
+                {
+                    let decoder = zstd::stream::Decoder::new(raw_content.as_slice())?;
+                    Box::new(std::io::BufReader::new(decoder))
+                } else {
+                    // tar
+                    Box::new(std::io::Cursor::new(raw_content))
+                }
+            }
         };
 
         let mut archive = tar::Archive::new(decompressed);
         let entries = archive.entries()?;
 
         for entry in entries {
-            let mut entry = entry?;
-            let path = entry.path()?;
-            let path_str = path.to_string_lossy();
+            let mut entry = match entry {
+                Ok(e) => e,
+                Err(_) => {
+                    continue;
+                }
+            };
+            let path_bytes = entry.path_bytes();
+            let path_str = String::from_utf8_lossy(&path_bytes);
 
-            // Look for the package directory
             if path_str.starts_with(&format!("{}/", package_name)) && path_str.ends_with("/desc") {
-                let mut content = String::new();
-                entry.read_to_string(&mut content)?;
-                return self.parse_desc_file(&content, package_name);
+                let mut content = Vec::new();
+                entry.read_to_end(&mut content)?;
+                let content_str = String::from_utf8_lossy(&content);
+                return self.parse_desc_file(&content_str, package_name);
             }
         }
 
@@ -237,125 +262,6 @@ impl Pacman {
             }
         }
         Ok(None)
-    }
-
-    fn read_local_db_entry(&self, package_name: &str) -> Result<Option<HashMap<String, String>>> {
-        let local_db_path = if let Some(root) = &self.isolated_root {
-            root.join("var/lib/pacman/local")
-        } else {
-            PathBuf::from("/var/lib/pacman/local")
-        };
-
-        if !local_db_path.exists() {
-            return Ok(None);
-        }
-
-        for entry in fs::read_dir(&local_db_path)? {
-            let entry = entry?;
-            let dir_name = entry.file_name().to_string_lossy().to_string();
-
-            if dir_name.starts_with(&format!("{}-", package_name)) {
-                let desc_path = entry.path().join("desc");
-                if desc_path.exists() {
-                    let content = fs::read_to_string(&desc_path)?;
-                    let mut info_map = HashMap::new();
-                    let mut current_key = String::new();
-                    let mut current_value = String::new();
-
-                    for line in content.lines() {
-                        if line.starts_with('%') && line.ends_with('%') {
-                            if !current_key.is_empty() {
-                                info_map
-                                    .insert(current_key.clone(), current_value.trim().to_string());
-                            }
-                            current_key = line.trim_matches('%').to_string();
-                            current_value.clear();
-                        } else if !current_key.is_empty() {
-                            if !current_value.is_empty() {
-                                current_value.push('\n');
-                            }
-                            current_value.push_str(line);
-                        }
-                    }
-
-                    if !current_key.is_empty() {
-                        info_map.insert(current_key, current_value.trim().to_string());
-                    }
-
-                    return Ok(Some(info_map));
-                }
-            }
-        }
-
-        Ok(None)
-    }
-
-    fn read_local_db_files(&self, package_name: &str) -> Result<Vec<String>> {
-        let local_db_path = if let Some(root) = &self.isolated_root {
-            root.join("var/lib/pacman/local")
-        } else {
-            PathBuf::from("/var/lib/pacman/local")
-        };
-
-        if !local_db_path.exists() {
-            return Ok(vec![]);
-        }
-
-        for entry in fs::read_dir(&local_db_path)? {
-            let entry = entry?;
-            let dir_name = entry.file_name().to_string_lossy().to_string();
-
-            if dir_name.starts_with(&format!("{}-", package_name)) {
-                let files_path = entry.path().join("files");
-                if files_path.exists() {
-                    let content = fs::read_to_string(&files_path)?;
-                    let files: Vec<String> = content
-                        .lines()
-                        .filter(|line| !line.is_empty() && !line.ends_with('/'))
-                        .map(|line| {
-                            if line.starts_with('/') {
-                                line[1..].to_string()
-                            } else {
-                                line.to_string()
-                            }
-                        })
-                        .collect();
-                    return Ok(files);
-                }
-            }
-        }
-
-        Ok(vec![])
-    }
-
-    fn run_pacman_isolated(&self, args: &[&str]) -> Result<std::process::Output> {
-        let root = self
-            .get_isolated_root()
-            .ok_or_else(|| anyhow::anyhow!("Pacman not configured for isolated operation"))?;
-
-        let db_path = self
-            .isolated_db_path
-            .as_ref()
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or(PACMAN_DB_PATH.to_string());
-
-        let mut cmd = if self.privilege.is_root() {
-            Command::new("pacman")
-        } else {
-            Command::new("sudo")
-        };
-
-        if !self.privilege.is_root() {
-            cmd.arg("pacman");
-        }
-
-        cmd.env("LC_ALL", "C");
-        cmd.arg("--root").arg(root);
-        cmd.arg("--dbpath").arg(db_path);
-        cmd.args(args);
-
-        cmd.output()
-            .map_err(|e| anyhow::anyhow!("Failed to run pacman in isolation: {}", e))
     }
 
     pub fn sync_database(&self) -> Result<()> {
@@ -471,6 +377,7 @@ impl Pacman {
                     size: metadata.len(),
                     mode: 0o120000,
                     symlink_target: Some(target),
+                    source_path: Some(full_path.to_string_lossy().to_string()),
                 });
             } else {
                 let hash = self.compute_hash_for_path(&full_path)?;
@@ -482,6 +389,7 @@ impl Pacman {
                     size: metadata.len(),
                     mode,
                     symlink_target: None,
+                    source_path: Some(full_path.to_string_lossy().to_string()),
                 });
             }
         }
@@ -505,64 +413,6 @@ impl Pacman {
         Ok(hex::encode(hasher.finalize()))
     }
 
-    pub fn install_to_isolated(
-        &self,
-        packages: &[String],
-    ) -> Result<(tempfile::TempDir, Vec<InstalledPackage>)> {
-        if self.isolated_root.is_none() {
-            return Err(anyhow::anyhow!(
-                "Pacman not configured for isolated operation. Use new() with a root path."
-            ));
-        }
-
-        if !self.privilege.is_root() && !self.privilege.test_sudo() {
-            return Err(anyhow::anyhow!(
-                "Root privileges required for package installation"
-            ));
-        }
-
-        let temp_dir = tempfile::tempdir().context("Failed to create temporary directory")?;
-
-        let target_root = temp_dir.path();
-
-        let mut args = vec![
-            "-Sy".to_string(),
-            "--root".to_string(),
-            target_root.to_string_lossy().to_string(),
-            "--noconfirm".to_string(),
-        ];
-        args.extend(packages.iter().cloned());
-
-        let output =
-            self.run_pacman_isolated(&args.iter().map(|s| s.as_str()).collect::<Vec<_>>())?;
-
-        if !output.status.success() {
-            return Err(anyhow::anyhow!(
-                "Failed to install packages: {}",
-                String::from_utf8_lossy(&output.stderr)
-            ));
-        }
-
-        let mut installed = Vec::new();
-        for pkg_name in packages {
-            if let Some(info) = self.package_info_from_system(pkg_name)? {
-                installed.push(InstalledPackage {
-                    name: info.name,
-                    version: info.version,
-                    release: info.release,
-                    install_time: SystemTime::now(),
-                    description: info.description,
-                    dependencies: info.dependencies,
-                    install_root: target_root.to_path_buf(),
-                    files: vec![],
-                    ty: PackageType::Pacman,
-                });
-            }
-        }
-
-        Ok((temp_dir, installed))
-    }
-
     pub fn exists_in_system(&self, name: &str) -> bool {
         self.package_store
             .get(name)
@@ -575,7 +425,6 @@ impl Pacman {
     }
 
     pub fn search_packages(&self, query: &str) -> Result<Vec<PackageInfo>> {
-        // Search in local package store
         let packages = self.package_store.list_all()?;
         let mut results = Vec::new();
 
@@ -601,12 +450,10 @@ impl Pacman {
     }
 
     pub fn get_package_size(&self, name: &str) -> Result<u64> {
-        // Try to get size from repo database
         if let Some(info) = self.get_package_info_from_repo_db(name)? {
             return Ok(info.size);
         }
 
-        // Try to get size from local package store
         if let Some(pkg) = self.package_store.get(name)? {
             let total_size: u64 = pkg.files.iter().map(|f| f.size).sum();
             return Ok(total_size);
@@ -918,6 +765,7 @@ impl Pacman {
                 } else {
                     None
                 };
+                let source = self.content_store.content_path(&hash);
 
                 files.push(FileEntry {
                     path,
@@ -925,6 +773,7 @@ impl Pacman {
                     size: metadata.len(),
                     mode,
                     symlink_target,
+                    source_path: Some(source.to_string_lossy().to_string()),
                 });
             }
         }

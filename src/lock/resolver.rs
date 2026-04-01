@@ -190,7 +190,7 @@ impl Resolver {
     }
 
     fn query_package(&self, name: &str, version: Option<&str>) -> Result<PackageInfo> {
-        let config = PackageConfig {
+        let pacman_config = PackageConfig {
             name: name.to_string(),
             version: version.map(String::from),
             build_type: crate::pkg::BuildType::Pacman,
@@ -198,19 +198,27 @@ impl Resolver {
             sandbox_config: None,
         };
 
-        let manager = self
-            .factory
-            .for_package(&config)
-            .map_err(|_| anyhow!("No package manager available for {}", name))?;
-        println!(
-            "Querying package info for {}, using {} (version: {:?})",
-            name,
-            manager.manager_name(),
-            version
-        );
-        manager
-            .query_package_info(name, version)?
-            .ok_or_else(|| anyhow!("Package not found: {}", name))
+        if let Ok(pacman) = self.factory.for_package(&pacman_config) {
+            println!(
+                "Querying package info for {}, using pacman (version: {:?})",
+                name, version
+            );
+            if let Some(info) = pacman.query_package_info(name, version)? {
+                return Ok(info);
+            }
+        }
+
+        if let Some(aur) = self.factory.aur_manager() {
+            println!(
+                "Querying package info for {}, using AUR (version: {:?})",
+                name, version
+            );
+            if let Some(info) = aur.query_package_info(name, version)? {
+                return Ok(info);
+            }
+        }
+
+        Err(anyhow!("Package not found: {}", name))
     }
 
     fn normalize_dep_name(dep: &str) -> String {

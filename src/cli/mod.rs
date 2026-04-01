@@ -284,7 +284,9 @@ fn build_system(system: Option<String>) -> Result<u64> {
     let tracker = LockTracker::new(config_dir);
     let lock_file = tracker.load()?;
     let Some(lock_file) = lock_file else {
-        return Err(anyhow!("No lock file found.\nRun 'rscm lock' first."));
+        return Err(anyhow!(
+            "No lock file found.\nRun 'rscm lock' first or use '-s' parameter."
+        ));
     };
     let id = store.create_generation(config, &lock_file)?;
     println!("New generation id: {}", id);

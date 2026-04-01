@@ -23,25 +23,35 @@ impl ContentStore {
         fs::copy(path, &dest).with_context(|| format!("Failed to copy to {:?}", dest))?;
         Ok(hash)
     }
-    pub fn link_to(&self, hash: &str, target: &Path) -> Result<()> {
-        let src = self.content_path(hash);
-        if !src.exists() {
-            anyhow::bail!("Content not found: {}", hash);
+    pub fn link_to(&self, src: &Option<String>, target: &Path) -> Result<()> {
+        let src_path = match src {
+            Some(path) => std::path::PathBuf::from(path),
+            None => anyhow::bail!("No source path available for file"),
+        };
+
+        if !src_path.exists() {
+            anyhow::bail!("Source file not found: {}", src_path.display());
         }
+
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent)?;
         }
-        if let Err(e) = fs::hard_link(&src, target) {
+
+        if src_path == target {
+            return Ok(());
+        }
+
+        if let Err(e) = fs::hard_link(&src_path, target) {
             if e.raw_os_error() == Some(libc::EXDEV) {
-                fs::copy(&src, target)?;
-            } else {
+                fs::copy(&src_path, target)?;
+            } else if e.raw_os_error() != Some(libc::EEXIST) {
                 return Err(e.into());
             }
         }
 
         Ok(())
     }
-    fn content_path(&self, hash: &str) -> PathBuf {
+    pub fn content_path(&self, hash: &str) -> PathBuf {
         self.root.join(&hash[0..2]).join(&hash[2..4]).join(hash)
     }
     fn calculate_hash(&self, path: &Path) -> Result<String> {

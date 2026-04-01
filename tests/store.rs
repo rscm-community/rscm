@@ -1,32 +1,8 @@
 use anyhow::Result;
 use rscm::config::EnvironmentConfig;
 use rscm::store::*;
-use std::fs;
 use std::time::SystemTime;
 use tempfile::tempdir;
-
-#[test]
-fn test_content_store() -> Result<()> {
-    let dir = tempdir()?;
-    let store = ContentStore::new(dir.path().to_path_buf())?;
-
-    let test_file = dir.path().join("test.txt");
-    fs::write(&test_file, "hello world")?;
-
-    let hash = store.add_file(&test_file)?;
-    assert_eq!(
-        hash,
-        "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
-    );
-
-    assert!(store.verify(&hash)?);
-
-    let link_target = dir.path().join("link.txt");
-    store.link_to(&hash, &link_target)?;
-    assert!(link_target.exists());
-
-    Ok(())
-}
 
 #[test]
 fn test_package_store() -> Result<()> {

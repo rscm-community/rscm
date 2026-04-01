@@ -39,7 +39,7 @@ impl GenerationStore {
         linker: F,
     ) -> Result<u64>
     where
-        F: Fn(&str, &Path) -> Result<()>,
+        F: Fn(&Option<String>, &Path) -> Result<()>,
     {
         let id = self.next_id()?;
         let gen_path = self.path(id);
@@ -48,11 +48,11 @@ impl GenerationStore {
         fs::create_dir_all(&files_path)?;
 
         for file in files {
-            let target = files_path.join(&file.path);
+            let target = files_path.join(file.path.trim_start_matches('/'));
             if let Some(target_path) = &file.symlink_target {
                 std::os::unix::fs::symlink(target_path, &target)?;
             } else {
-                linker(&file.hash, &target)?;
+                linker(&file.source_path, &target)?;
 
                 #[cfg(unix)]
                 {

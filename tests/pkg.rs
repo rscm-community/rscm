@@ -675,6 +675,7 @@ mod store_package_tests {
                 size: 1024,
                 mode: 0o755,
                 symlink_target: None,
+                source_path: None,
             }],
             dependencies: vec!["dep1".to_string()],
             install_time: SystemTime::now(),

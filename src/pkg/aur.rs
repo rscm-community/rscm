@@ -3,7 +3,7 @@ use super::{
     PackageType, SandboxConfig,
 };
 use crate::store::package::FileEntry;
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::Read;
@@ -936,6 +936,7 @@ impl AurHelper {
                     size: metadata.len(),
                     mode,
                     symlink_target,
+                    source_path: Some(full_path.to_string_lossy().to_string()),
                 });
             }
         }
@@ -985,7 +986,7 @@ impl AurHelper {
 
     fn copy_directory_contents(&self, src_dir: &Path, dst_dir: &Path) -> Result<Vec<FileEntry>> {
         let mut files = Vec::new();
-        self.copy_dir_recursive_with_entries(src_dir, dst_dir, &mut files, src_dir)?;
+        self.copy_dir_recursive_with_entries(src_dir, dst_dir, &mut files, dst_dir)?;
         Ok(files)
     }
 
@@ -1031,6 +1032,7 @@ impl AurHelper {
                         size: metadata.len(),
                         mode,
                         symlink_target,
+                        source_path: Some(dst_path.to_string_lossy().to_string()),
                     });
                 }
             }
@@ -1178,6 +1180,7 @@ impl Bubblewrap {
                     size: metadata.len(),
                     mode,
                     symlink_target,
+                    source_path: Some(full_path.to_string_lossy().to_string()),
                 });
             }
         }
