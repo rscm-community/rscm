@@ -232,9 +232,7 @@ impl PackageManagerFactory {
     }
 
     pub fn for_package(&self, config: &PackageConfig) -> Result<&dyn PackageManager> {
-        let is_aur = config.build_type == BuildType::Aur;
-
-        if is_aur {
+        if config.build_type == BuildType::Aur {
             if let Some(ref aur) = self.aur_helper {
                 return Ok(aur as &dyn PackageManager);
             }

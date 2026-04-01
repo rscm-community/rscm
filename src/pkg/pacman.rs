@@ -178,11 +178,17 @@ impl Pacman {
             let path_bytes = entry.path_bytes();
             let path_str = String::from_utf8_lossy(&path_bytes);
 
-            if path_str.starts_with(&format!("{}/", package_name)) && path_str.ends_with("/desc") {
-                let mut content = Vec::new();
-                entry.read_to_end(&mut content)?;
-                let content_str = String::from_utf8_lossy(&content);
-                return self.parse_desc_file(&content_str, package_name);
+            if path_str.ends_with("/desc") {
+                if let Some(first_segment) = path_str.split('/').next() {
+                    if first_segment.starts_with(&format!("{}-", package_name))
+                        || first_segment == package_name
+                    {
+                        let mut content = Vec::new();
+                        entry.read_to_end(&mut content)?;
+                        let content_str = String::from_utf8_lossy(&content);
+                        return self.parse_desc_file(&content_str, package_name);
+                    }
+                }
             }
         }
 
@@ -635,15 +641,17 @@ impl Pacman {
         }
 
         let body = response.text()?;
-        let mut available_packages: Vec<String> = Vec::new();
+        let mut available_packages: Vec<(String, String)> = Vec::new();
         for line in body.lines() {
             if line.contains(".pkg.tar.zst") || line.contains(".pkg.tar.xz") {
                 if let Some(start) = line.find("href=\"") {
                     let start = start + 6;
                     if let Some(end) = line[start..].find("\"") {
-                        let filename = &line[start..start + end];
-                        if !filename.ends_with(".sig") && filename.contains(name) {
-                            available_packages.push(filename.to_string());
+                        let filename_encoded = &line[start..start + end];
+                        if !filename_encoded.ends_with(".sig") && filename_encoded.contains(name) {
+                            let filename_decoded = filename_encoded.replace("%2B", "+");
+                            available_packages
+                                .push((filename_decoded, filename_encoded.to_string()));
                         }
                     }
                 }
@@ -658,11 +666,11 @@ impl Pacman {
         }
 
         let target_prefix = format!("{}-{}", name, version);
-        let package_filename = available_packages
+        let (package_filename, package_filename_encoded) = available_packages
             .iter()
-            .find(|p| {
-                p.starts_with(&target_prefix)
-                    && (p.ends_with(".pkg.tar.zst") || p.ends_with(".pkg.tar.xz"))
+            .find(|(decoded, _)| {
+                decoded.starts_with(&target_prefix)
+                    && (decoded.ends_with(".pkg.tar.zst") || decoded.ends_with(".pkg.tar.xz"))
             })
             .cloned()
             .ok_or_else(|| {
@@ -673,7 +681,7 @@ impl Pacman {
                 )
             })?;
 
-        let pkg_url = format!("{}/{}", archive_path, package_filename);
+        let pkg_url = format!("{}/{}", archive_path, package_filename_encoded);
         let cached_pkg_path = self.archive_cache_dir.join(&package_filename);
 
         let pkg_path = if cached_pkg_path.exists() {
@@ -747,6 +755,11 @@ impl Pacman {
                 continue;
             }
 
+            let entry_type = entry.header().entry_type();
+            if entry_type == tar::EntryType::Link {
+                continue;
+            }
+
             let full_path = temp_extract_dir.join(&path);
 
             if let Some(parent) = full_path.parent() {
@@ -756,6 +769,9 @@ impl Pacman {
             entry.unpack(&full_path)?;
 
             if let Ok(metadata) = fs::metadata(&full_path) {
+                if metadata.is_dir() {
+                    continue;
+                }
                 let hash = self.content_store.add_file(&full_path)?;
                 let mode = metadata.permissions().mode() & 0o7777;
                 let symlink_target = if metadata.file_type().is_symlink() {
@@ -826,16 +842,17 @@ impl Pacman {
         }
 
         let body = response.text()?;
-
-        let mut available_packages: Vec<String> = Vec::new();
+        let mut available_packages: Vec<(String, String)> = Vec::new();
         for line in body.lines() {
             if line.contains(".pkg.tar.zst") || line.contains(".pkg.tar.xz") {
                 if let Some(start) = line.find("href=\"") {
                     let start = start + 6;
                     if let Some(end) = line[start..].find("\"") {
-                        let filename = &line[start..start + end];
-                        if !filename.ends_with(".sig") && filename.contains(name) {
-                            available_packages.push(filename.to_string());
+                        let filename_encoded = &line[start..start + end];
+                        if !filename_encoded.ends_with(".sig") && filename_encoded.contains(name) {
+                            let filename_decoded = filename_encoded.replace("%2B", "+");
+                            available_packages
+                                .push((filename_decoded, filename_encoded.to_string()));
                         }
                     }
                 }
@@ -850,11 +867,11 @@ impl Pacman {
         }
 
         let target_prefix = format!("{}-{}", name, version);
-        let package_filename = available_packages
+        let (package_filename, package_filename_encoded) = available_packages
             .iter()
-            .find(|p| {
-                p.starts_with(&target_prefix)
-                    && (p.ends_with(".pkg.tar.zst") || p.ends_with(".pkg.tar.xz"))
+            .find(|(decoded, _)| {
+                decoded.starts_with(&target_prefix)
+                    && (decoded.ends_with(".pkg.tar.zst") || decoded.ends_with(".pkg.tar.xz"))
             })
             .cloned()
             .ok_or_else(|| {
@@ -865,7 +882,7 @@ impl Pacman {
                 )
             })?;
 
-        let pkg_url = format!("{}/{}", archive_path, package_filename);
+        let pkg_url = format!("{}/{}", archive_path, package_filename_encoded);
 
         let cached_pkg_path = self.archive_cache_dir.join(&package_filename);
 
