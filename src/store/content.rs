@@ -41,7 +41,7 @@ impl ContentStore {
             return Ok(());
         }
 
-        if let Err(e) = fs::hard_link(&src_path, target) {
+        if let Err(e) = std::os::unix::fs::symlink(&src_path, target) {
             if e.raw_os_error() == Some(libc::EXDEV) {
                 fs::copy(&src_path, target)?;
             } else if e.raw_os_error() != Some(libc::EEXIST) {

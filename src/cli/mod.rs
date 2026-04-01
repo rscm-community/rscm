@@ -4,7 +4,7 @@ use crate::lock::{LockManager, LockTracker};
 use crate::lua::LuaEngine;
 use crate::store::Store;
 use crate::toolchain::ToolchainManager;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use clap::{Parser, Subcommand};
 use nix::unistd::geteuid;
 use std::{
@@ -671,10 +671,12 @@ pub fn run(cli: Cli) -> Result<()> {
                 }
             }
 
-            if generations_deleted > 0 && !dry_run {
-                println!("Deleted {} generation(s).", generations_deleted);
-            } else if generations_deleted > 0 && dry_run {
-                println!("Would delete {} generation(s).", generations_deleted);
+            if generations_deleted > 0 {
+                if dry_run {
+                    println!("Would delete {} generation(s).", generations_deleted);
+                } else {
+                    println!("Deleted {} generation(s).", generations_deleted);
+                }
             }
 
             let result = store.gc(dry_run)?;

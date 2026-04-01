@@ -223,6 +223,40 @@ impl PackageStore {
         Ok(removed)
     }
 
+    pub fn get_by_full_name(&self, full_name: &str) -> Result<Option<Package>> {
+        if !self.root.exists() {
+            return Ok(None);
+        }
+
+        let prefix = format!("{}-", full_name);
+        for entry in fs::read_dir(&self.root)? {
+            let entry = entry?;
+            let path = entry.path();
+
+            if !path.is_dir() {
+                continue;
+            }
+
+            let dir_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if !dir_name.starts_with(&prefix) {
+                continue;
+            }
+
+            let manifest_path = path.join("manifest.toml");
+            if manifest_path.exists() {
+                let content = fs::read_to_string(&manifest_path)?;
+                let pkg: Package = toml::from_str(&content)?;
+                return Ok(Some(pkg));
+            }
+        }
+
+        Ok(None)
+    }
+
+    pub fn root(&self) -> &std::path::Path {
+        &self.root
+    }
+
     pub fn get_all_package_names(&self) -> Result<Vec<String>> {
         let mut packages = Vec::new();
         if !self.root.exists() {

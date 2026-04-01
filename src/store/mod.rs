@@ -182,17 +182,17 @@ impl Store {
         let mut result = GcResult::default();
 
         let mut reachable_contents: HashSet<String> = HashSet::new();
-        let mut reachable_packages: HashSet<String> = HashSet::new();
+        let mut reachable_pkg_prefixes: HashSet<String> = HashSet::new();
 
         let generations = self.generations.list()?;
         for generation in &generations {
-            for pkg_name in &generation.manifest.packages {
-                reachable_packages.insert(pkg_name.clone());
-
-                if let Some(pkg) = self.packages.get(pkg_name)? {
+            for pkg_full_name in &generation.manifest.packages {
+                if let Some(pkg) = self.packages.get_by_full_name(pkg_full_name)? {
                     for file in &pkg.files {
                         reachable_contents.insert(file.hash.clone());
                     }
+                    let dir_name = format!("{}-{}-", pkg.name, pkg.version);
+                    reachable_pkg_prefixes.insert(dir_name);
                 }
             }
         }
@@ -212,19 +212,30 @@ impl Store {
             }
         }
 
-        let all_pkg_names = self.packages.get_all_package_names()?;
-        for name in &all_pkg_names {
-            if !reachable_packages.contains(name) {
+        if !self.packages.root().exists() {
+            return Ok(result);
+        }
+        for entry in fs::read_dir(self.packages.root())? {
+            let entry = entry?;
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let dir_name = entry.file_name().to_string_lossy().to_string();
+            let is_reachable = reachable_pkg_prefixes
+                .iter()
+                .any(|prefix| dir_name.starts_with(prefix));
+            if !is_reachable {
                 if !dry_run {
-                    if let Ok(pkgs) = self.packages.list_versions(name) {
-                        for pkg in &pkgs {
+                    if let Ok(content) = fs::read_to_string(path.join("manifest.toml")) {
+                        if let Ok(pkg) = toml::from_str::<Package>(&content) {
                             for file in &pkg.files {
                                 result.freed_space += file.size;
                             }
                         }
                     }
-                    self.packages.remove(name, None)?;
-                    self.reference.remove_entry(name);
+                    fs::remove_dir_all(&path)?;
+                    self.reference.remove_entry(&dir_name);
                 }
                 result.collected_packages += 1;
             }
