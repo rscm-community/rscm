@@ -4,54 +4,93 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum RefKind {
+    Content,
+    Package,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RefEntry {
+    pub count: usize,
+    pub kind: RefKind,
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct ReferenceCounter {
-    counts: HashMap<String, usize>,
+    refs: HashMap<String, RefEntry>,
     path: PathBuf,
 }
 
 impl ReferenceCounter {
     pub fn new(path: PathBuf) -> Result<Self> {
-        let counts = if path.exists() {
+        let refs = if path.exists() {
             let content = fs::read_to_string(&path)?;
             serde_json::from_str(&content)?
         } else {
             HashMap::new()
         };
 
-        Ok(Self { counts, path })
+        Ok(Self { refs, path })
     }
 
-    pub fn add(&mut self, hash: &str) -> Result<()> {
-        *self.counts.entry(hash.to_string()).or_insert(0) += 1;
+    pub fn add(&mut self, hash: &str, kind: RefKind) -> Result<()> {
+        let entry = self
+            .refs
+            .entry(hash.to_string())
+            .or_insert(RefEntry { count: 0, kind });
+        entry.count += 1;
         self.save()?;
         Ok(())
     }
 
-    pub fn remove(&mut self, hash: &str) -> Result<usize> {
-        if let Some(count) = self.counts.get_mut(hash) {
-            *count -= 1;
-            let new_count = *count;
-
-            if *count == 0 {
-                self.counts.remove(hash);
+    pub fn remove(&mut self, hash: &str) -> Result<()> {
+        if let Some(entry) = self.refs.get_mut(hash) {
+            if entry.count > 0 {
+                entry.count -= 1;
             }
-
+            if entry.count == 0 {
+                self.refs.remove(hash);
+            }
             self.save()?;
-            Ok(new_count)
-        } else {
-            Ok(0)
         }
+        Ok(())
     }
-    pub fn get_unreferenced(&self) -> Vec<String> {
-        self.counts
+
+    pub fn get_count(&self, hash: &str) -> usize {
+        self.refs.get(hash).map(|e| e.count).unwrap_or(0)
+    }
+
+    pub fn get_unreferenced(&self, kind: Option<RefKind>) -> Vec<String> {
+        self.refs
             .iter()
-            .filter(|&(_, &count)| count == 0)
+            .filter(|(_, entry)| match &kind {
+                Some(k) => entry.kind == *k,
+                None => true,
+            })
+            .filter(|(_, entry)| entry.count == 0)
             .map(|(hash, _)| hash.clone())
             .collect()
     }
+
+    pub fn get_all_hashes(&self, kind: Option<RefKind>) -> Vec<String> {
+        self.refs
+            .iter()
+            .filter(|(_, entry)| match &kind {
+                Some(k) => entry.kind == *k,
+                None => true,
+            })
+            .map(|(hash, _)| hash.clone())
+            .collect()
+    }
+
+    pub fn remove_entry(&mut self, hash: &str) {
+        self.refs.remove(hash);
+        let _ = self.save();
+    }
+
     fn save(&self) -> Result<()> {
-        let json = serde_json::to_string_pretty(&self.counts)?;
+        let json = serde_json::to_string_pretty(&self.refs)?;
         fs::write(&self.path, json)?;
         Ok(())
     }

@@ -222,4 +222,29 @@ impl PackageStore {
 
         Ok(removed)
     }
+
+    pub fn get_all_package_names(&self) -> Result<Vec<String>> {
+        let mut packages = Vec::new();
+        if !self.root.exists() {
+            return Ok(packages);
+        }
+
+        for entry in fs::read_dir(&self.root)? {
+            let entry = entry?;
+            let path = entry.path();
+
+            if !path.is_dir() {
+                continue;
+            }
+
+            let dir_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+
+            if let Some(name) = dir_name.split('-').next() {
+                if !packages.contains(&name.to_string()) {
+                    packages.push(name.to_string());
+                }
+            }
+        }
+        Ok(packages)
+    }
 }

@@ -76,4 +76,52 @@ impl ContentStore {
         let actual = self.calculate_hash(&path)?;
         Ok(actual == hash)
     }
+
+    pub fn remove(&self, hash: &str) -> Result<bool> {
+        let path = self.content_path(hash);
+        if path.exists() {
+            fs::remove_file(&path)?;
+            if let Some(parent) = path.parent() {
+                if parent.exists() {
+                    let _ = fs::remove_dir(parent);
+                    if let Some(grandparent) = parent.parent() {
+                        if grandparent.exists() {
+                            let _ = fs::remove_dir(grandparent);
+                        }
+                    }
+                }
+            }
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    pub fn list_all_hashes(&self) -> Result<Vec<String>> {
+        let mut hashes = Vec::new();
+        if !self.root.exists() {
+            return Ok(hashes);
+        }
+        for entry1 in fs::read_dir(&self.root)? {
+            let entry1 = entry1?;
+            if !entry1.file_type()?.is_dir() {
+                continue;
+            }
+            for entry2 in fs::read_dir(entry1.path())? {
+                let entry2 = entry2?;
+                if !entry2.file_type()?.is_dir() {
+                    continue;
+                }
+                for entry3 in fs::read_dir(entry2.path())? {
+                    let entry3 = entry3?;
+                    if entry3.file_type()?.is_file() {
+                        if let Some(name) = entry3.file_name().to_str() {
+                            hashes.push(name.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        Ok(hashes)
+    }
 }

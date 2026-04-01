@@ -4,7 +4,7 @@ use crate::lock::{LockManager, LockTracker};
 use crate::lua::LuaEngine;
 use crate::store::Store;
 use crate::toolchain::ToolchainManager;
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use clap::{Parser, Subcommand};
 use nix::unistd::geteuid;
 use std::{
@@ -85,6 +85,40 @@ pub enum Commands {
     Cache {
         #[command(subcommand)]
         action: CacheAction,
+    },
+    #[command(about = "Garbage collect unreferenced store contents")]
+    Gc {
+        #[arg(
+            long,
+            short,
+            help = "Show what would be deleted without actually deleting"
+        )]
+        dry_run: bool,
+        #[arg(
+            long,
+            help = "Delete unreferenced generations before running GC (keeps current generation)"
+        )]
+        generations: bool,
+        #[arg(
+            long,
+            requires = "generations",
+            help = "When used with --generations, keep the most recent N generations"
+        )]
+        keep: Option<u64>,
+        #[arg(
+            long,
+            requires = "generations",
+            help = "When used with --generations, remove the oldest N generations"
+        )]
+        remove_oldest: Option<u64>,
+        #[arg(long, help = "Delete the specified generation before running GC")]
+        delete_generation: Option<u64>,
+        #[arg(
+            long,
+            value_delimiter = ',',
+            help = "Delete the specified generations before running GC (comma-separated IDs)"
+        )]
+        delete_generations: Option<Vec<u64>>,
     },
 }
 
@@ -329,7 +363,7 @@ pub fn run(cli: Cli) -> Result<()> {
         }
         Commands::Generations { action } => {
             let store_root = get_store_root()?;
-            let store = Store::new(store_root)?;
+            let mut store = Store::new(store_root)?;
             match action {
                 GenerationsAction::List => {
                     let generations = store.list_generations()?;
@@ -545,6 +579,114 @@ pub fn run(cli: Cli) -> Result<()> {
                     Ok(())
                 }
             }
+        }
+        Commands::Gc {
+            dry_run,
+            generations,
+            keep,
+            remove_oldest,
+            delete_generation,
+            delete_generations,
+        } => {
+            check_root();
+            let store_root = get_store_root()?;
+            let mut store = Store::new(store_root)?;
+
+            let current_link = Path::new("/rscm/current-system");
+            let current_id = if current_link.exists() {
+                fs::read_link(current_link)
+                    .ok()
+                    .and_then(|p| {
+                        p.file_name()
+                            .map(|n| n.to_os_string())
+                            .and_then(|s| s.into_string().ok())
+                    })
+                    .and_then(|s| s.parse::<u64>().ok())
+            } else {
+                None
+            };
+
+            let mut generations_deleted = 0u64;
+
+            if let Some(id) = delete_generation {
+                if Some(id) == current_id {
+                    return Err(anyhow!(
+                        "Cannot delete generation {}: it is currently active",
+                        id
+                    ));
+                }
+                store.delete_generation(id)?;
+                generations_deleted += 1;
+            }
+
+            if let Some(ids) = delete_generations {
+                for id in &ids {
+                    if Some(*id) == current_id {
+                        return Err(anyhow!(
+                            "Cannot delete generation {}: it is currently active",
+                            id
+                        ));
+                    }
+                    store.delete_generation(*id)?;
+                    generations_deleted += 1;
+                }
+            }
+
+            if generations {
+                let all_gens = store.list_generations()?;
+                let mut ids: Vec<u64> = all_gens.iter().map(|g| g.id).collect();
+                ids.sort();
+
+                if let Some(n) = keep {
+                    let keep_count = n as usize;
+                    let ids_to_keep: Vec<u64> =
+                        ids.iter().rev().take(keep_count).cloned().collect();
+                    let ids_to_delete: Vec<u64> = ids
+                        .iter()
+                        .filter(|id| !ids_to_keep.contains(id))
+                        .cloned()
+                        .collect();
+                    for id in ids_to_delete {
+                        if Some(id) != current_id {
+                            store.delete_generation(id)?;
+                            generations_deleted += 1;
+                        }
+                    }
+                } else if let Some(n) = remove_oldest {
+                    let remove_count = n as usize;
+                    let ids_to_delete: Vec<u64> = ids.iter().take(remove_count).cloned().collect();
+                    for id in ids_to_delete {
+                        if Some(id) != current_id {
+                            store.delete_generation(id)?;
+                            generations_deleted += 1;
+                        }
+                    }
+                } else {
+                    for g in &all_gens {
+                        if Some(g.id) != current_id {
+                            store.delete_generation(g.id)?;
+                            generations_deleted += 1;
+                        }
+                    }
+                }
+            }
+
+            if generations_deleted > 0 && !dry_run {
+                println!("Deleted {} generation(s).", generations_deleted);
+            } else if generations_deleted > 0 && dry_run {
+                println!("Would delete {} generation(s).", generations_deleted);
+            }
+
+            let result = store.gc(dry_run)?;
+            if dry_run {
+                println!("Dry run - would collect:");
+            } else {
+                println!("Collected:");
+            }
+            println!("  {} content files", result.collected_contents);
+            println!("  {} packages", result.collected_packages);
+            println!("  freed: {}", CacheManager::format_size(result.freed_space));
+            Ok(())
         }
     }
 }

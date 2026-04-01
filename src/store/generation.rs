@@ -125,6 +125,19 @@ impl GenerationStore {
         generations.sort_by_key(|g| g.id);
         Ok(generations)
     }
+
+    pub fn get(&self, id: u64) -> Result<Option<Generation>> {
+        let path = self.path(id);
+        let manifest_path = path.join("manifest.toml");
+        if manifest_path.exists() {
+            let content = fs::read_to_string(manifest_path)?;
+            let manifest = toml::from_str(&content)?;
+            Ok(Some(Generation { id, path, manifest }))
+        } else {
+            Ok(None)
+        }
+    }
+
     fn next_id(&self) -> Result<u64> {
         let mut max_id = 0;
         for entry in fs::read_dir(&self.root)? {

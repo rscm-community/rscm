@@ -5,10 +5,11 @@ pub mod reference;
 
 pub use content::ContentStore;
 pub use generation::{Generation, GenerationStore};
-pub use package::{Package, PackageStore};
-pub use reference::ReferenceCounter;
+pub use package::{FileEntry, Package, PackageStore};
+pub use reference::{RefKind, ReferenceCounter};
 
 use anyhow::Result;
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -16,6 +17,13 @@ use crate::config::Configuration;
 use crate::lock::LockFile;
 use crate::pkg::{BuildType, PackageConfig, PackageManagerFactory};
 use crate::store::generation::GenerationManifest;
+
+#[derive(Debug, Default)]
+pub struct GcResult {
+    pub collected_contents: usize,
+    pub collected_packages: usize,
+    pub freed_space: u64,
+}
 
 pub struct Store {
     root: PathBuf,
@@ -52,8 +60,9 @@ impl Store {
     pub fn register_package(&mut self, pkg: Package) -> Result<()> {
         self.packages.save(&pkg)?;
         for file in &pkg.files {
-            self.reference.add(&file.hash)?;
+            self.reference.add(&file.hash, RefKind::Content)?;
         }
+        self.reference.add(&pkg.name, RefKind::Package)?;
         Ok(())
     }
 
@@ -133,7 +142,8 @@ impl Store {
         std::os::unix::fs::symlink(current.join("variables.sh"), env_path)?;
         Ok(())
     }
-    pub fn delete_generation(&self, id: u64) -> Result<()> {
+
+    pub fn delete_generation(&mut self, id: u64) -> Result<()> {
         let current_link = Path::new("/rscm/current-system");
         if current_link.exists() {
             let current_target = fs::read_link(current_link)?;
@@ -146,10 +156,80 @@ impl Store {
                 }
             }
         }
+
+        let generation = self.generations.get(id)?;
+        if let Some(generation) = generation {
+            for pkg_name in &generation.manifest.packages {
+                if let Some(pkg) = self.packages.get(pkg_name)? {
+                    for file in &pkg.files {
+                        self.reference.remove(&file.hash)?;
+                    }
+                    self.reference.remove(pkg_name)?;
+                } else {
+                    self.reference.remove(pkg_name)?;
+                }
+            }
+        }
+
         self.generations.delete(id)
     }
 
     pub fn list_generations(&self) -> Result<Vec<Generation>> {
         self.generations.list()
+    }
+
+    pub fn gc(&mut self, dry_run: bool) -> Result<GcResult> {
+        let mut result = GcResult::default();
+
+        let mut reachable_contents: HashSet<String> = HashSet::new();
+        let mut reachable_packages: HashSet<String> = HashSet::new();
+
+        let generations = self.generations.list()?;
+        for generation in &generations {
+            for pkg_name in &generation.manifest.packages {
+                reachable_packages.insert(pkg_name.clone());
+
+                if let Some(pkg) = self.packages.get(pkg_name)? {
+                    for file in &pkg.files {
+                        reachable_contents.insert(file.hash.clone());
+                    }
+                }
+            }
+        }
+
+        let all_content_hashes = self.content.list_all_hashes()?;
+        for hash in &all_content_hashes {
+            if !reachable_contents.contains(hash) {
+                if !dry_run {
+                    let path = self.content.content_path(hash);
+                    if let Ok(metadata) = fs::metadata(&path) {
+                        result.freed_space += metadata.len();
+                    }
+                    self.content.remove(hash)?;
+                    self.reference.remove_entry(hash);
+                }
+                result.collected_contents += 1;
+            }
+        }
+
+        let all_pkg_names = self.packages.get_all_package_names()?;
+        for name in &all_pkg_names {
+            if !reachable_packages.contains(name) {
+                if !dry_run {
+                    if let Ok(pkgs) = self.packages.list_versions(name) {
+                        for pkg in &pkgs {
+                            for file in &pkg.files {
+                                result.freed_space += file.size;
+                            }
+                        }
+                    }
+                    self.packages.remove(name, None)?;
+                    self.reference.remove_entry(name);
+                }
+                result.collected_packages += 1;
+            }
+        }
+
+        Ok(result)
     }
 }
