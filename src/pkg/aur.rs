@@ -1,6 +1,6 @@
 use super::{
-    BuildType, InstalledPackage, PackageConfig, PackageInfo, PackageManager, PackageSource,
-    PackageType, SandboxConfig,
+    pacman::Pacman, BuildType, InstalledPackage, PackageConfig, PackageInfo, PackageManager,
+    PackageSource, PackageType, SandboxConfig,
 };
 use crate::store::package::FileEntry;
 use anyhow::{anyhow, Context, Result};
@@ -133,18 +133,26 @@ pub struct AurHelper {
     pkg_dest: PathBuf,
     cache_dir: PathBuf,
     store_root: PathBuf,
+    makedepends_root: PathBuf,
+    pacman: Pacman,
 }
 
 impl AurHelper {
     pub fn new(build_dir: PathBuf, pkg_dest: PathBuf, store_root: PathBuf) -> Self {
         let cache_dir = store_root.join("cache/aur");
+        let makedepends_root = store_root.join("tmp/makedepends");
         let _ = fs::create_dir_all(&cache_dir);
+        let _ = fs::create_dir_all(&makedepends_root);
+
+        let pacman = Pacman::system(store_root.clone());
 
         Self {
             build_dir,
             pkg_dest,
             cache_dir,
             store_root,
+            makedepends_root,
+            pacman,
         }
     }
 
@@ -584,11 +592,92 @@ impl AurHelper {
             rw_paths: vec![],
         });
 
-        let pkg_file = self.build_direct(&clone_dir)?;
+        let pkgbuild_path = clone_dir.join("PKGBUILD");
+        let content = fs::read_to_string(&pkgbuild_path).context("Failed to read PKGBUILD")?;
+        let pkg_info = PkgBuildInfo::parse(&content, "unknown")
+            .ok_or_else(|| anyhow!("Failed to parse PKGBUILD"))?;
+
+        let installed_makedeps = self.ensure_makedepends(&pkg_info.makedepends)?;
+
+        let result = self.build_direct(&clone_dir);
+
+        if !installed_makedeps.is_empty() {
+            self.cleanup_makedepends(&installed_makedeps)?;
+        }
+
+        let pkg_file = result?;
         println!("Successfully built AUR package {}", name);
         Ok(pkg_file)
     }
 
+    fn ensure_makedepends(&self, makedepends: &[String]) -> Result<Vec<String>> {
+        let mut installed = Vec::new();
+
+        for dep in makedepends {
+            let dep_name = Self::normalize_dep_name(dep);
+            if !self.is_package_installed(&dep_name) {
+                println!(
+                    "Build dependency {} not installed, installing temporarily...",
+                    dep_name
+                );
+                self.install_makedepend(&dep_name)?;
+                installed.push(dep_name);
+            } else {
+                println!("Build dependency {} already installed, skipping", dep_name);
+            }
+        }
+
+        Ok(installed)
+    }
+
+    fn is_package_installed(&self, name: &str) -> bool {
+        self.pacman
+            .package_info_from_system(name)
+            .is_ok_and(|p| p.is_some())
+            || self
+                .pacman
+                .package_info_from_sync_db(name, None)
+                .is_ok_and(|p| p.is_some())
+    }
+
+    fn install_makedepend(&self, name: &str) -> Result<()> {
+        fs::create_dir_all(&self.makedepends_root)?;
+
+        let config = PackageConfig {
+            name: name.to_string(),
+            version: None,
+            build_type: BuildType::Pacman,
+            dependencies: vec![],
+            sandbox_config: None,
+        };
+
+        self.pacman.install(&config, false)?;
+
+        println!("Successfully installed temporary build dependency {}", name);
+        Ok(())
+    }
+
+    fn cleanup_makedepends(&self, installed: &[String]) -> Result<()> {
+        if !self.makedepends_root.exists() {
+            return Ok(());
+        }
+
+        println!("Cleaning up temporarily installed build dependencies...");
+        for name in installed {
+            let _ = self.pacman.remove(name, None, false);
+        }
+        println!("Cleaned up temporary build dependencies");
+
+        Ok(())
+    }
+
+    fn normalize_dep_name(dep: &str) -> String {
+        dep.split(|c: char| c == '<' || c == '>' || c == '=' || c == ' ')
+            .next()
+            .unwrap_or(dep)
+            .trim()
+            .to_string()
+    }
     fn build_direct(&self, pkg_dir: &Path) -> Result<PathBuf> {
         let pkgbuild_path = pkg_dir.join("PKGBUILD");
         let content = fs::read_to_string(&pkgbuild_path).context("Failed to read PKGBUILD")?;
