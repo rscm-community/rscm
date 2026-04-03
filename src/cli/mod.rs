@@ -4,7 +4,7 @@ use crate::lock::{LockManager, LockTracker};
 use crate::lua::LuaEngine;
 use crate::store::Store;
 use crate::toolchain::ToolchainManager;
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use clap::{Parser, Subcommand};
 use nix::unistd::geteuid;
 use std::{
@@ -13,6 +13,7 @@ use std::{
     process,
 };
 
+const SYSTEM_CONFIG_DIR: &str = "/etc/rscm";
 const SYSTEM_CONFIG_PATH: &str = "/etc/rscm/configuration.lua";
 const LOCAL_CONFIG_NAME: &str = "configuration.lua";
 const USER_CONFIG_SUBDIR: &str = ".config/rscm";
@@ -212,7 +213,7 @@ pub fn init_store(force: bool) -> Result<PathBuf> {
     if !force && system_store.exists() {
         println!("✓ Store already exists at {}", SYSTEM_STORE_ROOT);
     } else {
-        println!("Creating {} (requires root)...", SYSTEM_STORE_ROOT);
+        println!("Creating {}...", SYSTEM_STORE_ROOT);
 
         std::fs::create_dir_all(&system_store).map_err(|e| {
             anyhow!(
@@ -278,6 +279,167 @@ fn create_store_subdirs(store_root: &Path) -> Result<()> {
     Ok(())
 }
 
+fn init_config_dir() -> Result<()> {
+    let config_dir = Path::new(SYSTEM_CONFIG_DIR);
+    let config_file = config_dir.join("configuration.lua");
+
+    if config_dir.exists() {
+        println!(
+            "✓ Configuration directory {} already exists",
+            SYSTEM_CONFIG_DIR
+        );
+    } else {
+        println!("Creating {}...", SYSTEM_CONFIG_DIR);
+        std::fs::create_dir_all(config_dir).map_err(|e| {
+            anyhow!(
+                "Failed to create {}: {}. Run with sudo.",
+                SYSTEM_CONFIG_DIR,
+                e
+            )
+        })?;
+        println!("✓ Created {}", SYSTEM_CONFIG_DIR);
+    }
+
+    if config_file.exists() {
+        println!("✓ Configuration file {} already exists", SYSTEM_CONFIG_PATH);
+    } else {
+        println!("Creating {}...", SYSTEM_CONFIG_PATH);
+        let default_config = r#"-- rscm configuration file
+
+sources {
+    -- Define external sources here
+    -- Example:
+    -- dotfiles = github {
+    --     owner = "your-username",
+    --     repo = "dotfiles",
+    --     ref = "main",
+    -- },
+}
+
+system {
+    hostname = "my-host",
+    timezone = "Asia/Shanghai",
+    locale = "zh_CN.UTF-8",
+    locales = {
+        "zh_CN.UTF-8 UTF-8",
+        "en_US.UTF-8 UTF-8",
+    },
+    keymap = "us",
+    cleanup = {
+        generations = { keep = 10 },
+    },
+}
+
+packages {
+    -- List packages to install
+    "vim",
+    "git",
+    "curl",
+}
+
+services {
+    -- Define systemd services
+    -- sshd = {
+    --     enable = true,
+    --     start_now = true,
+    -- },
+}
+
+users {
+    -- Define user accounts
+    -- alice = {
+    --     uid = 1000,
+    --     groups = { "wheel" },
+    --     shell = "/bin/zsh",
+    -- },
+}
+
+network {
+    -- interfaces = {
+    --     eth0 = { dhcp = true },
+    -- },
+}
+
+boot {
+    -- kernel = {
+    --     package = "linux",
+    --     params = {
+    --         "quiet",
+    --         "splash",
+    --     },
+    -- },
+    -- loader = {
+    --     type = "systemd-boot",
+    --     systemdBoot = {
+    --         enable = true,
+    --     },
+    },
+}
+
+hardware {
+    -- graphics = {
+    --     enable = true,
+    --     driver = "auto",
+    -- },
+}
+
+security {
+    -- sudo = {
+    --     enable = true,
+    --     wheelNeedsPassword = true,
+    -- },
+}
+
+filesystems {
+    -- Define filesystem mount points
+    -- ["/"] = {
+    --     device = "/dev/sda1",
+    --     fsType = "ext4",
+    --     options = { "defaults", "noatime" },
+    -- },
+}
+
+swapdevices {
+    -- Define swap devices
+    -- {
+    --     device = "/dev/sda2",
+    --     size = 8192,
+    -- },
+}
+
+environment {
+    -- sessionVariables = {
+    --     LANG = "zh_CN.UTF-8",
+    -- },
+    -- variables = {
+    --     EDITOR = "vim",
+    -- },
+}
+
+programs {
+    -- Enable and configure programs
+    -- git = {
+    --     enable = true,
+    --     config = {
+    --         ["user.name"] = "Your Name",
+    --         ["user.email"] = "your@email.com",
+    --     },
+    -- },
+}
+"#;
+        std::fs::write(&config_file, default_config).map_err(|e| {
+            anyhow!(
+                "Failed to create {}: {}. Run with sudo.",
+                SYSTEM_CONFIG_PATH,
+                e
+            )
+        })?;
+        println!("✓ Created {}", SYSTEM_CONFIG_PATH);
+    }
+
+    Ok(())
+}
+
 fn check_root() {
     let euid = geteuid();
     if !euid.is_root() {
@@ -330,9 +492,11 @@ fn build_system(system: Option<String>) -> Result<u64> {
 pub fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Commands::Init { force } => {
-            println!("Initializing rscm storage...");
+            println!("Initializing rscm...");
+            init_config_dir()?;
             let store_root = init_store(force)?;
             println!("\nStore root: {}", store_root.display());
+            println!("Configuration: {}", SYSTEM_CONFIG_PATH);
             println!("You can now run 'rscm lock' to create a lock file.");
             Ok(())
         }
