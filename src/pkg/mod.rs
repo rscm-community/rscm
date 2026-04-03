@@ -1,4 +1,5 @@
 pub mod aur;
+pub mod install_script;
 pub mod lock;
 pub mod pacman;
 pub mod privilege;
@@ -105,6 +106,7 @@ impl InstalledPackage {
             files: file_entries,
             dependencies: self.dependencies.clone(),
             install_time: self.install_time,
+            install_script: None,
         }
     }
 }

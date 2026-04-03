@@ -1,3 +1,4 @@
+use super::install_script::execute_post_install;
 use super::{
     BuildType, InstalledPackage, PackageConfig, PackageInfo, PackageManager, PackageSource,
     PackageType,
@@ -5,14 +6,13 @@ use super::{
 use crate::pkg::privilege::PrivilegeManager;
 use crate::store::package::FileEntry;
 use crate::store::{ContentStore, PackageStore};
-use anyhow::{Context, Result};
+use anyhow::Result;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::SystemTime;
 
 const PACMAN_DB_PATH: &str = "/var/lib/pacman";
@@ -914,12 +914,23 @@ impl Pacman {
 
         let mut archive = tar::Archive::new(decompressed);
         let mut files = Vec::new();
+        let mut install_script_content = None;
 
         for entry in archive.entries()? {
             let mut entry = entry?;
             let path = entry.path()?.to_string_lossy().to_string();
 
             if path.ends_with(".pkginfo") || path == ".PKGINFO" {
+                continue;
+            }
+
+            if path.ends_with(".INSTALL") || path == ".INSTALL" {
+                let full_path = temp_extract_dir.join(&path);
+                if let Some(parent) = full_path.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                entry.unpack(&full_path)?;
+                install_script_content = Some(fs::read_to_string(&full_path)?);
                 continue;
             }
 
@@ -962,6 +973,13 @@ impl Pacman {
             }
         }
 
+        let install_script = if let Some(content) = install_script_content {
+            let functions = super::install_script::parse_install_script(&content);
+            Some(crate::store::package::InstallScript { content, functions })
+        } else {
+            None
+        };
+
         let pkg = crate::store::Package {
             name: name.to_string(),
             version: ver.clone(),
@@ -969,9 +987,16 @@ impl Pacman {
             files,
             dependencies: pkg_info.dependencies.clone(),
             install_time: SystemTime::now(),
+            install_script: install_script.clone(),
         };
 
         self.package_store.save(&pkg)?;
+
+        if let Some(ref script) = install_script {
+            if script.functions.iter().any(|f| f == "post_install") {
+                execute_post_install(script, name, &ver)?;
+            }
+        }
 
         Ok(PackageInfo {
             name: name.to_string(),

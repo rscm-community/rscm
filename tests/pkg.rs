@@ -1,11 +1,11 @@
 use anyhow::Result;
 use rscm::pkg::{
-    BuildType, PackageConfig, PackageManager, PackageManagerFactory, PackageType,
-    PackageSource, RemoveResult, SandboxConfig, aur::AurHelper, lock::GlobalLock, pacman::Pacman,
+    aur::AurHelper, lock::GlobalLock, pacman::Pacman, BuildType, PackageConfig, PackageManager,
+    PackageManagerFactory, PackageSource, PackageType, RemoveResult, SandboxConfig,
 };
 use std::fs;
-use tempfile::tempdir;
 use std::path::PathBuf;
+use tempfile::tempdir;
 
 mod global_lock_tests {
     use super::*;
@@ -643,8 +643,8 @@ mod aur_install_tests {
 
 mod store_package_tests {
     use super::*;
-    use rscm::store::PackageStore;
     use rscm::store::package::{FileEntry, Package};
+    use rscm::store::PackageStore;
     use std::time::SystemTime;
 
     #[test]
@@ -679,6 +679,7 @@ mod store_package_tests {
             }],
             dependencies: vec!["dep1".to_string()],
             install_time: SystemTime::now(),
+            install_script: None,
         };
 
         package_store.save(&pkg)?;
@@ -708,6 +709,7 @@ mod store_package_tests {
             files: vec![],
             dependencies: vec![],
             install_time: SystemTime::now(),
+            install_script: None,
         };
 
         let pkg2 = Package {
@@ -717,6 +719,7 @@ mod store_package_tests {
             files: vec![],
             dependencies: vec![],
             install_time: SystemTime::now(),
+            install_script: None,
         };
 
         package_store.save(&pkg1)?;

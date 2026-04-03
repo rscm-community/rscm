@@ -18,6 +18,7 @@ fn test_package_store() -> Result<()> {
         files: vec![],
         dependencies: vec![],
         install_time: SystemTime::now(),
+        install_script: None,
     };
 
     store.save(&pkg)?;
@@ -187,6 +188,7 @@ fn test_gc_preserves_reachable_content() -> Result<()> {
         }],
         dependencies: vec![],
         install_time: SystemTime::now(),
+        install_script: None,
     };
 
     let gen_dir = generations_dir.join("1");

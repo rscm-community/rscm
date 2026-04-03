@@ -1,6 +1,8 @@
 use super::{
-    pacman::Pacman, BuildType, InstalledPackage, PackageConfig, PackageInfo, PackageManager,
-    PackageSource, PackageType, SandboxConfig,
+    install_script::{execute_post_install, parse_install_script},
+    pacman::Pacman,
+    BuildType, InstalledPackage, PackageConfig, PackageInfo, PackageManager, PackageSource,
+    PackageType, SandboxConfig,
 };
 use crate::store::package::FileEntry;
 use anyhow::{anyhow, Context, Result};
@@ -1098,67 +1100,6 @@ impl AurHelper {
         Ok(())
     }
 
-    fn extract_package_files(
-        &self,
-        pkg_file: &Path,
-        store_pkg_dir: &Path,
-    ) -> Result<Vec<FileEntry>> {
-        let file = std::fs::File::open(pkg_file)?;
-
-        let decompressed: Box<dyn Read> = if pkg_file.to_string_lossy().ends_with(".zst") {
-            let mut decoder = zstd::stream::Decoder::new(file)?;
-            Box::new(std::io::BufReader::new(decoder))
-        } else {
-            Box::new(file)
-        };
-
-        let mut archive = tar::Archive::new(decompressed);
-        let mut files = Vec::new();
-
-        for entry in archive.entries()? {
-            let mut entry = entry?;
-            let path = entry.path()?.to_string_lossy().to_string();
-
-            if path.ends_with(".pkginfo") || path == ".PKGINFO" {
-                continue;
-            }
-
-            let full_path = store_pkg_dir.join(&path);
-
-            if let Some(parent) = full_path.parent() {
-                fs::create_dir_all(parent)?;
-            }
-
-            entry.unpack(&full_path)?;
-
-            if let Ok(metadata) = fs::symlink_metadata(&full_path) {
-                if metadata.is_dir() {
-                    continue;
-                }
-                let hash = self.compute_hash_for_path(&full_path)?;
-                let mode = metadata.permissions().mode() & 0o7777;
-                let symlink_target = if metadata.file_type().is_symlink() {
-                    fs::read_link(&full_path)
-                        .ok()
-                        .map(|p| p.to_string_lossy().to_string())
-                } else {
-                    None
-                };
-
-                files.push(FileEntry {
-                    path,
-                    hash,
-                    size: metadata.len(),
-                    mode,
-                    symlink_target,
-                    source_path: Some(full_path.to_string_lossy().to_string()),
-                });
-            }
-        }
-
-        Ok(files)
-    }
-
     fn compute_hash_for_path(&self, path: &Path) -> Result<String> {
         let mut file = fs::File::open(path)?;
         let mut hasher = Sha256::new();
@@ -1268,6 +1209,85 @@ impl AurHelper {
 
         Ok(())
     }
+
+    fn extract_package_files(
+        &self,
+        pkg_file: &Path,
+        store_pkg_dir: &Path,
+    ) -> Result<(Vec<FileEntry>, Option<crate::store::package::InstallScript>)> {
+        let file = std::fs::File::open(pkg_file)?;
+
+        let decompressed: Box<dyn Read> = if pkg_file.to_string_lossy().ends_with(".zst") {
+            let mut decoder = zstd::stream::Decoder::new(file)?;
+            Box::new(std::io::BufReader::new(decoder))
+        } else {
+            Box::new(file)
+        };
+
+        let mut archive = tar::Archive::new(decompressed);
+        let mut files = Vec::new();
+        let mut install_script_content = None;
+
+        for entry in archive.entries()? {
+            let mut entry = entry?;
+            let path = entry.path()?.to_string_lossy().to_string();
+
+            if path.ends_with(".pkginfo") || path == ".PKGINFO" {
+                continue;
+            }
+
+            if path.ends_with(".INSTALL") || path == ".INSTALL" {
+                let full_path = store_pkg_dir.join(&path);
+                if let Some(parent) = full_path.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                entry.unpack(&full_path)?;
+                install_script_content = Some(fs::read_to_string(&full_path)?);
+                continue;
+            }
+
+            let full_path = store_pkg_dir.join(&path);
+
+            if let Some(parent) = full_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+
+            entry.unpack(&full_path)?;
+
+            if let Ok(metadata) = fs::symlink_metadata(&full_path) {
+                if metadata.is_dir() {
+                    continue;
+                }
+                let hash = self.compute_hash_for_path(&full_path)?;
+                let mode = metadata.permissions().mode() & 0o7777;
+                let symlink_target = if metadata.file_type().is_symlink() {
+                    fs::read_link(&full_path)
+                        .ok()
+                        .map(|p| p.to_string_lossy().to_string())
+                } else {
+                    None
+                };
+
+                files.push(FileEntry {
+                    path,
+                    hash,
+                    size: metadata.len(),
+                    mode,
+                    symlink_target,
+                    source_path: Some(full_path.to_string_lossy().to_string()),
+                });
+            }
+        }
+
+        let install_script = if let Some(content) = install_script_content {
+            let functions = parse_install_script(&content);
+            Some(crate::store::package::InstallScript { content, functions })
+        } else {
+            None
+        };
+
+        Ok((files, install_script))
+    }
 }
 
 pub struct Bubblewrap {
@@ -1357,83 +1377,22 @@ impl Bubblewrap {
 
         Ok(())
     }
+}
 
-    fn extract_package_files(
-        &self,
-        pkg_file: &Path,
-        store_pkg_dir: &Path,
-    ) -> Result<Vec<FileEntry>> {
-        let file = std::fs::File::open(pkg_file)?;
+fn compute_hash_for_path_bubblewrap(path: &Path) -> Result<String> {
+    let mut file = fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 8192];
 
-        let decompressed: Box<dyn Read> = if pkg_file.to_string_lossy().ends_with(".zst") {
-            let mut decoder = zstd::stream::Decoder::new(file)?;
-            Box::new(std::io::BufReader::new(decoder))
-        } else {
-            Box::new(file)
-        };
-
-        let mut archive = tar::Archive::new(decompressed);
-        let mut files = Vec::new();
-
-        for entry in archive.entries()? {
-            let mut entry = entry?;
-            let path = entry.path()?.to_string_lossy().to_string();
-
-            if path.ends_with(".pkginfo") || path == ".PKGINFO" {
-                continue;
-            }
-
-            let full_path = store_pkg_dir.join(&path);
-
-            if let Some(parent) = full_path.parent() {
-                fs::create_dir_all(parent)?;
-            }
-
-            entry.unpack(&full_path)?;
-
-            if let Ok(metadata) = fs::symlink_metadata(&full_path) {
-                if metadata.is_dir() {
-                    continue;
-                }
-                let hash = self.compute_hash_for_path(&full_path)?;
-                let mode = metadata.permissions().mode() & 0o7777;
-                let symlink_target = if metadata.file_type().is_symlink() {
-                    fs::read_link(&full_path)
-                        .ok()
-                        .map(|p| p.to_string_lossy().to_string())
-                } else {
-                    None
-                };
-
-                files.push(FileEntry {
-                    path,
-                    hash,
-                    size: metadata.len(),
-                    mode,
-                    symlink_target,
-                    source_path: Some(full_path.to_string_lossy().to_string()),
-                });
-            }
+    loop {
+        let bytes_read = file.read(&mut buffer)?;
+        if bytes_read == 0 {
+            break;
         }
-
-        Ok(files)
+        hasher.update(&buffer[..bytes_read]);
     }
 
-    fn compute_hash_for_path(&self, path: &Path) -> Result<String> {
-        let mut file = fs::File::open(path)?;
-        let mut hasher = Sha256::new();
-        let mut buffer = [0u8; 8192];
-
-        loop {
-            let bytes_read = file.read(&mut buffer)?;
-            if bytes_read == 0 {
-                break;
-            }
-            hasher.update(&buffer[..bytes_read]);
-        }
-
-        Ok(hex::encode(hasher.finalize()))
-    }
+    Ok(hex::encode(hasher.finalize()))
 }
 
 impl Default for Bubblewrap {
@@ -1479,11 +1438,14 @@ impl PackageManager for AurHelper {
         ));
         fs::create_dir_all(&store_pkg_dir)?;
 
-        let files =
+        let (files, install_script) =
             if build_output.is_file() && build_output.to_string_lossy().ends_with(".pkg.tar.zst") {
                 self.extract_package_files(&build_output, &store_pkg_dir)?
             } else if build_output.is_dir() {
-                self.copy_directory_contents(&build_output, &store_pkg_dir)?
+                (
+                    self.copy_directory_contents(&build_output, &store_pkg_dir)?,
+                    None,
+                )
             } else {
                 return Err(anyhow!(
                     "Build output is neither a package file nor a directory: {}",
@@ -1498,10 +1460,19 @@ impl PackageManager for AurHelper {
             files,
             dependencies: info.dependencies.clone(),
             install_time: SystemTime::now(),
+            install_script: install_script.clone(),
         };
 
         let manifest_path = store_pkg_dir.join("manifest.toml");
         fs::write(manifest_path, toml::to_string_pretty(&pkg)?)?;
+
+        if let Some(ref script) = install_script {
+            if script.functions.iter().any(|f| f == "post_install") {
+                if let Err(e) = execute_post_install(&script, &info.name, &info.version) {
+                    eprintln!("Warning: post_install hook failed: {}", e);
+                }
+            }
+        }
 
         info.installed = true;
         info.source = PackageSource::Aur;

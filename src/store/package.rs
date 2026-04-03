@@ -17,6 +17,12 @@ pub struct FileEntry {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InstallScript {
+    pub content: String,
+    pub functions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Package {
     pub name: String,
     pub version: String,
@@ -24,6 +30,8 @@ pub struct Package {
     pub files: Vec<FileEntry>,
     pub dependencies: Vec<String>,
     pub install_time: SystemTime,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install_script: Option<InstallScript>,
 }
 
 #[derive(Debug, Clone)]
