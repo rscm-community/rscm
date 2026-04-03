@@ -368,14 +368,22 @@ impl Pacman {
                             .trim()
                             .to_string();
                         if prov_clean == virtual_name {
-                            let path_str_owned = path_str.to_string();
-                            if let Some(pkg_dir) = path_str_owned.split('/').next() {
-                                let pkg_name = pkg_dir
-                                    .rsplit_once('-')
-                                    .map(|(n, _)| n.to_string())
-                                    .unwrap_or_else(|| pkg_dir.to_string());
-                                return self.parse_desc_file(&content_str, &pkg_name);
-                            }
+                            let actual_name = info_map
+                                .get("NAME")
+                                .map(|s| s.trim().to_string())
+                                .unwrap_or_else(|| {
+                                    let path_str_owned = path_str.to_string();
+                                    if let Some(pkg_dir) = path_str_owned.split('/').next() {
+                                        pkg_dir
+                                            .rsplitn(3, '-')
+                                            .last()
+                                            .unwrap_or(pkg_dir)
+                                            .to_string()
+                                    } else {
+                                        String::new()
+                                    }
+                                });
+                            return self.parse_desc_file(&content_str, &actual_name);
                         }
                     }
                 }
@@ -803,10 +811,12 @@ impl Pacman {
                     let start = start + 6;
                     if let Some(end) = line[start..].find("\"") {
                         let filename_encoded = &line[start..start + end];
-                        if !filename_encoded.ends_with(".sig") && filename_encoded.contains(name) {
+                        if !filename_encoded.ends_with(".sig") {
                             let filename_decoded = decode_url_encoded(filename_encoded);
-                            available_packages
-                                .push((filename_decoded, filename_encoded.to_string()));
+                            if filename_decoded.contains(name) {
+                                available_packages
+                                    .push((filename_decoded, filename_encoded.to_string()));
+                            }
                         }
                     }
                 }
@@ -893,7 +903,10 @@ impl Pacman {
 
         let file = File::open(&pkg_path)?;
         let decompressed: Box<dyn Read> = if pkg_path.to_string_lossy().ends_with(".zst") {
-            let mut decoder = zstd::stream::Decoder::new(file)?;
+            let decoder = zstd::stream::Decoder::new(file)?;
+            Box::new(std::io::BufReader::new(decoder))
+        } else if pkg_path.to_string_lossy().ends_with(".xz") {
+            let decoder = xz2::read::XzDecoder::new(file);
             Box::new(std::io::BufReader::new(decoder))
         } else {
             Box::new(file)
@@ -1005,10 +1018,12 @@ impl Pacman {
                     let start = start + 6;
                     if let Some(end) = line[start..].find("\"") {
                         let filename_encoded = &line[start..start + end];
-                        if !filename_encoded.ends_with(".sig") && filename_encoded.contains(name) {
+                        if !filename_encoded.ends_with(".sig") {
                             let filename_decoded = decode_url_encoded(filename_encoded);
-                            available_packages
-                                .push((filename_decoded, filename_encoded.to_string()));
+                            if filename_decoded.contains(name) {
+                                available_packages
+                                    .push((filename_decoded, filename_encoded.to_string()));
+                            }
                         }
                     }
                 }
@@ -1107,7 +1122,10 @@ impl Pacman {
         let file_size = file.metadata()?.len();
 
         let decompressed: Box<dyn Read> = if pkg_path.to_string_lossy().ends_with(".zst") {
-            let mut decoder = zstd::stream::Decoder::new(file)?;
+            let decoder = zstd::stream::Decoder::new(file)?;
+            Box::new(std::io::BufReader::new(decoder))
+        } else if pkg_path.to_string_lossy().ends_with(".xz") {
+            let decoder = xz2::read::XzDecoder::new(file);
             Box::new(std::io::BufReader::new(decoder))
         } else {
             Box::new(file)
