@@ -137,7 +137,16 @@ impl Store {
                 path_dirs.push(format!("/rscm/current-system/{}", dir));
             }
         }
-        let path_value = path_dirs.join(":");
+
+        let system_path = std::env::var("PATH").unwrap_or_default();
+        let mut path_value = path_dirs.join(":");
+        if !system_path.is_empty() && !path_value.is_empty() {
+            path_value = format!("{}:{}", path_value, system_path);
+        } else if system_path.is_empty() && path_value.is_empty() {
+            path_value = String::new();
+        } else if path_value.is_empty() {
+            path_value = system_path;
+        }
 
         let mut lib_dirs = Vec::new();
         for dir in &["lib", "lib64", "usr/lib", "usr/lib64"] {
@@ -279,11 +288,11 @@ impl Store {
         let all_content_hashes = self.content.list_all_hashes()?;
         for hash in &all_content_hashes {
             if !reachable_contents.contains(hash) {
+                let path = self.content.content_path(hash);
+                if let Ok(metadata) = fs::metadata(&path) {
+                    result.freed_space += metadata.len();
+                }
                 if !dry_run {
-                    let path = self.content.content_path(hash);
-                    if let Ok(metadata) = fs::metadata(&path) {
-                        result.freed_space += metadata.len();
-                    }
                     self.content.remove(hash)?;
                     self.reference.remove_entry(hash);
                 }
@@ -305,14 +314,14 @@ impl Store {
                 .iter()
                 .any(|prefix| dir_name.starts_with(prefix));
             if !is_reachable {
-                if !dry_run {
-                    if let Ok(content) = fs::read_to_string(path.join("manifest.toml")) {
-                        if let Ok(pkg) = toml::from_str::<Package>(&content) {
-                            for file in &pkg.files {
-                                result.freed_space += file.size;
-                            }
+                if let Ok(content) = fs::read_to_string(path.join("manifest.toml")) {
+                    if let Ok(pkg) = toml::from_str::<Package>(&content) {
+                        for file in &pkg.files {
+                            result.freed_space += file.size;
                         }
                     }
+                }
+                if !dry_run {
                     fs::remove_dir_all(&path)?;
                     self.reference.remove_entry(&dir_name);
                 }
