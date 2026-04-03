@@ -148,6 +148,30 @@ impl Store {
         }
         let rscm_ld_path = lib_dirs.join(":");
 
+        let mut include_dirs = Vec::new();
+        for dir in &["usr/include"] {
+            let full_path = gen_path.join(dir);
+            if full_path.exists() {
+                include_dirs.push(format!("/rscm/current-system/{}", dir));
+            }
+        }
+        let rscm_include_path = include_dirs.join(":");
+
+        let mut pkgconfig_dirs = Vec::new();
+        for dir in &[
+            "lib/pkgconfig",
+            "lib64/pkgconfig",
+            "usr/lib/pkgconfig",
+            "usr/lib64/pkgconfig",
+            "usr/share/pkgconfig",
+        ] {
+            let full_path = gen_path.join(dir);
+            if full_path.exists() {
+                pkgconfig_dirs.push(format!("/rscm/current-system/{}", dir));
+            }
+        }
+        let rscm_pkgconfig_path = pkgconfig_dirs.join(":");
+
         let session_env_path = current.join("session.env");
         let variables_sh_path = current.join("variables.sh");
 
@@ -172,6 +196,18 @@ impl Store {
                 rscm_ld_path
             ));
         }
+        if !rscm_include_path.is_empty() {
+            session_env_content.push_str(&format!(
+                "\nCPATH={}${{CPATH:+:$CPATH}}\n",
+                rscm_include_path
+            ));
+        }
+        if !rscm_pkgconfig_path.is_empty() {
+            session_env_content.push_str(&format!(
+                "\nPKG_CONFIG_PATH={}${{PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}}\n",
+                rscm_pkgconfig_path
+            ));
+        }
         fs::write(&session_env_path, &session_env_content)?;
 
         if !rscm_path.is_empty() {
@@ -179,8 +215,20 @@ impl Store {
         }
         if !rscm_ld_path.is_empty() {
             variables_sh_content.push_str(&format!(
-                "export LD_LIBRARY_PATH={}:$LD_LIBRARY_PATH\n",
+                "export LD_LIBRARY_PATH={}:${{LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}}\n",
                 rscm_ld_path
+            ));
+        }
+        if !rscm_include_path.is_empty() {
+            variables_sh_content.push_str(&format!(
+                "export CPATH={}:${{CPATH:+:$CPATH}}\n",
+                rscm_include_path
+            ));
+        }
+        if !rscm_pkgconfig_path.is_empty() {
+            variables_sh_content.push_str(&format!(
+                "export PKG_CONFIG_PATH={}:${{PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}}\n",
+                rscm_pkgconfig_path
             ));
         }
         fs::write(&variables_sh_path, &variables_sh_content)?;
@@ -205,6 +253,12 @@ impl Store {
         }
         if !rscm_ld_path.is_empty() {
             println!("LD_LIBRARY_PATH prepended: {}", rscm_ld_path);
+        }
+        if !rscm_include_path.is_empty() {
+            println!("CPATH prepended: {}", rscm_include_path);
+        }
+        if !rscm_pkgconfig_path.is_empty() {
+            println!("PKG_CONFIG_PATH prepended: {}", rscm_pkgconfig_path);
         }
 
         Ok(())
