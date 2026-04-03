@@ -597,13 +597,13 @@ impl AurHelper {
         let pkg_info = PkgBuildInfo::parse(&content, "unknown")
             .ok_or_else(|| anyhow!("Failed to parse PKGBUILD"))?;
 
-        let installed_makedeps = self.ensure_makedepends(&pkg_info.makedepends)?;
+        let _installed_makedeps = self.ensure_makedepends(&pkg_info.makedepends)?;
+
+        self.extract_makedepends(&pkg_info.makedepends)?;
 
         let result = self.build_direct(&clone_dir);
 
-        if !installed_makedeps.is_empty() {
-            self.cleanup_makedepends(&installed_makedeps)?;
-        }
+        self.cleanup_makedepends()?;
 
         let pkg_file = result?;
         println!("Successfully built AUR package {}", name);
@@ -615,34 +615,28 @@ impl AurHelper {
 
         for dep in makedepends {
             let dep_name = Self::normalize_dep_name(dep);
-            if !self.is_package_installed(&dep_name) {
+            if !self.is_package_in_store(&dep_name) {
                 println!(
-                    "Build dependency {} not installed, installing temporarily...",
+                    "Build dependency {} not in store, downloading and storing...",
                     dep_name
                 );
                 self.install_makedepend(&dep_name)?;
                 installed.push(dep_name);
             } else {
-                println!("Build dependency {} already installed, skipping", dep_name);
+                println!("Build dependency {} already in store, skipping", dep_name);
             }
         }
 
         Ok(installed)
     }
 
-    fn is_package_installed(&self, name: &str) -> bool {
+    fn is_package_in_store(&self, name: &str) -> bool {
         self.pacman
             .package_info_from_system(name)
             .is_ok_and(|p| p.is_some())
-            || self
-                .pacman
-                .package_info_from_sync_db(name, None)
-                .is_ok_and(|p| p.is_some())
     }
 
     fn install_makedepend(&self, name: &str) -> Result<()> {
-        fs::create_dir_all(&self.makedepends_root)?;
-
         let config = PackageConfig {
             name: name.to_string(),
             version: None,
@@ -653,22 +647,119 @@ impl AurHelper {
 
         self.pacman.install(&config, false)?;
 
-        println!("Successfully installed temporary build dependency {}", name);
+        println!("Stored build dependency {}", name);
         Ok(())
     }
 
-    fn cleanup_makedepends(&self, installed: &[String]) -> Result<()> {
-        if !self.makedepends_root.exists() {
-            return Ok(());
-        }
+    fn extract_makedepends(&self, makedepends: &[String]) -> Result<()> {
+        let _ = fs::remove_dir_all(&self.makedepends_root);
+        fs::create_dir_all(&self.makedepends_root)?;
 
-        println!("Cleaning up temporarily installed build dependencies...");
-        for name in installed {
-            let _ = self.pacman.remove(name, None, false);
+        for dep in makedepends {
+            let dep_name = Self::normalize_dep_name(dep);
+            if let Some(pkg) = self.pacman.package_info_from_system(&dep_name)? {
+                let store_pkg = self.pacman.package_store().get(&dep_name)?;
+                if let Some(pkg_data) = store_pkg {
+                    for file_entry in &pkg_data.files {
+                        let dest = self.makedepends_root.join(&file_entry.path);
+                        if let Some(parent) = dest.parent() {
+                            fs::create_dir_all(parent)?;
+                        }
+                        let source = self.pacman.content_store().content_path(&file_entry.hash);
+                        if source.exists() {
+                            fs::copy(&source, &dest)?;
+                            if file_entry.mode & 0o111 != 0 {
+                                let mut perms = fs::metadata(&dest)?.permissions();
+                                perms.set_mode(file_entry.mode);
+                                fs::set_permissions(&dest, perms)?;
+                            }
+                        }
+                    }
+                }
+            }
         }
-        println!("Cleaned up temporary build dependencies");
 
         Ok(())
+    }
+
+    fn cleanup_makedepends(&self) -> Result<()> {
+        if self.makedepends_root.exists() {
+            let _ = fs::remove_dir_all(&self.makedepends_root);
+        }
+        Ok(())
+    }
+
+    fn build_env(&self) -> Vec<(String, String)> {
+        let bin = self.makedepends_root.join("bin");
+        let sbin = self.makedepends_root.join("sbin");
+        let lib = self.makedepends_root.join("lib");
+        let lib64 = self.makedepends_root.join("lib64");
+        let usr_bin = self.makedepends_root.join("usr/bin");
+        let usr_sbin = self.makedepends_root.join("usr/sbin");
+        let usr_lib = self.makedepends_root.join("usr/lib");
+        let usr_lib64 = self.makedepends_root.join("usr/lib64");
+        let usr_include = self.makedepends_root.join("usr/include");
+        let usr_share_pkgconfig = self.makedepends_root.join("usr/share/pkgconfig");
+        let usr_lib_pkgconfig = self.makedepends_root.join("usr/lib/pkgconfig");
+
+        let mut env_vars = Vec::new();
+
+        let mut paths = Vec::new();
+        if bin.exists() {
+            paths.push(bin.to_string_lossy().to_string());
+        }
+        if sbin.exists() {
+            paths.push(sbin.to_string_lossy().to_string());
+        }
+        if usr_bin.exists() {
+            paths.push(usr_bin.to_string_lossy().to_string());
+        }
+        if usr_sbin.exists() {
+            paths.push(usr_sbin.to_string_lossy().to_string());
+        }
+        if !paths.is_empty() {
+            paths.push("$PATH".to_string());
+            env_vars.push(("PATH".to_string(), paths.join(":")));
+        }
+
+        let mut lib_paths = Vec::new();
+        if lib.exists() {
+            lib_paths.push(lib.to_string_lossy().to_string());
+        }
+        if lib64.exists() {
+            lib_paths.push(lib64.to_string_lossy().to_string());
+        }
+        if usr_lib.exists() {
+            lib_paths.push(usr_lib.to_string_lossy().to_string());
+        }
+        if usr_lib64.exists() {
+            lib_paths.push(usr_lib64.to_string_lossy().to_string());
+        }
+        if !lib_paths.is_empty() {
+            lib_paths.push("$LD_LIBRARY_PATH".to_string());
+            env_vars.push(("LD_LIBRARY_PATH".to_string(), lib_paths.join(":")));
+        }
+
+        let mut pkg_config_paths = Vec::new();
+        if usr_share_pkgconfig.exists() {
+            pkg_config_paths.push(usr_share_pkgconfig.to_string_lossy().to_string());
+        }
+        if usr_lib_pkgconfig.exists() {
+            pkg_config_paths.push(usr_lib_pkgconfig.to_string_lossy().to_string());
+        }
+        if !pkg_config_paths.is_empty() {
+            pkg_config_paths.push("$PKG_CONFIG_PATH".to_string());
+            env_vars.push(("PKG_CONFIG_PATH".to_string(), pkg_config_paths.join(":")));
+        }
+
+        if usr_include.exists() {
+            env_vars.push((
+                "CPATH".to_string(),
+                format!("{}:$CPATH", usr_include.to_string_lossy()),
+            ));
+        }
+
+        env_vars
     }
 
     fn normalize_dep_name(dep: &str) -> String {
@@ -797,6 +888,10 @@ impl AurHelper {
         script.push_str("export LOGDEST=$(pwd)/logs\n");
         script.push_str("mkdir -p \"$SRCDEST\" \"$LOGDEST\"\n");
 
+        for (key, value) in self.build_env() {
+            script.push_str(&format!("export {}=\"{}\"\n", key, value));
+        }
+
         script.push_str("source PKGBUILD\n");
 
         script.push_str("if declare -f prepare >/dev/null 2>&1; then\n");
@@ -847,6 +942,10 @@ impl AurHelper {
         script.push_str("export SRCDEST=$(pwd)/src\n");
         script.push_str("export LOGDEST=$(pwd)/logs\n");
         script.push_str("mkdir -p \"$SRCDEST\" \"$LOGDEST\"\n");
+
+        for (key, value) in self.build_env() {
+            script.push_str(&format!("export {}=\"{}\"\n", key, value));
+        }
 
         script.push_str("source PKGBUILD\n");
 

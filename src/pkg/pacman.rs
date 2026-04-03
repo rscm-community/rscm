@@ -85,15 +85,12 @@ impl Pacman {
         }
     }
 
-    fn get_isolated_root(&self) -> Option<&Path> {
-        self.isolated_root.as_deref()
+    pub fn package_store(&self) -> &PackageStore {
+        &self.package_store
     }
 
-    fn get_case_insensitive<'a>(map: &'a HashMap<String, String>, key: &str) -> Option<&'a String> {
-        let key_lower = key.to_lowercase();
-        map.iter()
-            .find(|(k, _)| k.to_lowercase() == key_lower)
-            .map(|(_, v)| v)
+    pub fn content_store(&self) -> &ContentStore {
+        &self.content_store
     }
 
     fn download_repo_db(&self, repo: &str) -> Result<PathBuf> {
