@@ -707,6 +707,43 @@ impl PackageManager for Pacman {
     }
 }
 
+fn decode_url_encoded(s: &str) -> String {
+    let mut result = String::new();
+    let mut chars = s.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        if c == '%' {
+            let h1 = chars.next();
+            let h2 = chars.next();
+
+            if let (Some(h1), Some(h2)) = (h1, h2) {
+                let hex_str: String = vec![h1, h2].iter().collect();
+                if let Ok(val) = u8::from_str_radix(&hex_str, 16) {
+                    result.push(val as char);
+                } else {
+                    result.push('%');
+                    result.push(h1);
+                    result.push(h2);
+                }
+            } else {
+                result.push('%');
+                if let Some(h) = h1 {
+                    result.push(h);
+                }
+                if let Some(h) = h2 {
+                    result.push(h);
+                }
+            }
+        } else if c == '+' {
+            result.push(' ');
+        } else {
+            result.push(c);
+        }
+    }
+
+    result
+}
+
 impl Pacman {
     pub fn install_from_archive_to_store(
         &self,
@@ -767,7 +804,7 @@ impl Pacman {
                     if let Some(end) = line[start..].find("\"") {
                         let filename_encoded = &line[start..start + end];
                         if !filename_encoded.ends_with(".sig") && filename_encoded.contains(name) {
-                            let filename_decoded = filename_encoded.replace("%2B", "+");
+                            let filename_decoded = decode_url_encoded(filename_encoded);
                             available_packages
                                 .push((filename_decoded, filename_encoded.to_string()));
                         }
@@ -969,7 +1006,7 @@ impl Pacman {
                     if let Some(end) = line[start..].find("\"") {
                         let filename_encoded = &line[start..start + end];
                         if !filename_encoded.ends_with(".sig") && filename_encoded.contains(name) {
-                            let filename_decoded = filename_encoded.replace("%2B", "+");
+                            let filename_decoded = decode_url_encoded(filename_encoded);
                             available_packages
                                 .push((filename_decoded, filename_encoded.to_string()));
                         }
