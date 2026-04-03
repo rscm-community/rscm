@@ -4,7 +4,11 @@ use rscm::*;
 
 fn main() {
     let cli = cli::Cli::parse();
-    if let Err(e) = cli::run(cli) {
+    let result = cli::run(cli);
+    if cfg!(debug_assertions) {
+        result.unwrap();
+    } else {
+    if let Err(e) = result {
         eprintln!("Error: {}", e);
 
         let msg = e.to_string();
@@ -16,5 +20,6 @@ fn main() {
         }
 
         std::process::exit(1);
+    }
     }
 }

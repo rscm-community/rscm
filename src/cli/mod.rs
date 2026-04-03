@@ -282,7 +282,7 @@ fn check_root() {
     let euid = geteuid();
     if !euid.is_root() {
         println!("Hint: This operation requires root privileges.\nRun with: sudo rscm <command>");
-        process::exit(-1);
+        process::exit(1);
     }
 }
 
