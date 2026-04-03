@@ -14,13 +14,24 @@ impl ContentStore {
         Ok(Self { root })
     }
     pub fn add_file(&self, path: &Path) -> Result<String> {
-        let hash = self.calculate_hash(path)?;
+        let hash = if path.is_symlink() {
+            let target = fs::read_link(path)?;
+            let hash = Sha256::digest(target.to_string_lossy().as_bytes());
+            hex::encode(hash)
+        } else {
+            self.calculate_hash(path)?
+        };
         let dest = self.content_path(&hash);
         if dest.exists() {
             return Ok(hash);
         }
         fs::create_dir_all(dest.parent().unwrap())?;
-        fs::copy(path, &dest).with_context(|| format!("Failed to copy to {:?}", dest))?;
+        if path.is_symlink() {
+            let target = fs::read_link(path)?;
+            fs::write(&dest, target.to_string_lossy().as_bytes())?;
+        } else {
+            fs::copy(path, &dest).with_context(|| format!("Failed to copy to {:?}", dest))?;
+        }
         Ok(hash)
     }
     pub fn link_to(&self, src: &Option<String>, target: &Path) -> Result<()> {

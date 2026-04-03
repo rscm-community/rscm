@@ -491,11 +491,11 @@ impl Pacman {
         for file_path in files {
             let full_path = root.join(&file_path);
 
-            if !full_path.exists() {
+            let metadata = fs::symlink_metadata(&full_path)?;
+
+            if !metadata.is_file() && !metadata.is_symlink() {
                 continue;
             }
-
-            let metadata = fs::metadata(&full_path)?;
 
             if metadata.file_type().is_symlink() {
                 let target = fs::read_link(&full_path)?.to_string_lossy().to_string();
@@ -504,7 +504,7 @@ impl Pacman {
                 entries.push(FileEntry {
                     path: file_path,
                     hash: target_hash,
-                    size: metadata.len(),
+                    size: 0,
                     mode: 0o120000,
                     symlink_target: Some(target),
                     source_path: Some(full_path.to_string_lossy().to_string()),
@@ -936,7 +936,7 @@ impl Pacman {
 
             entry.unpack(&full_path)?;
 
-            if let Ok(metadata) = fs::metadata(&full_path) {
+            if let Ok(metadata) = fs::symlink_metadata(&full_path) {
                 if metadata.is_dir() {
                     continue;
                 }

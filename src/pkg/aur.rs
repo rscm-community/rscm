@@ -1131,7 +1131,10 @@ impl AurHelper {
 
             entry.unpack(&full_path)?;
 
-            if let Ok(metadata) = fs::metadata(&full_path) {
+            if let Ok(metadata) = fs::symlink_metadata(&full_path) {
+                if metadata.is_dir() {
+                    continue;
+                }
                 let hash = self.compute_hash_for_path(&full_path)?;
                 let mode = metadata.permissions().mode() & 0o7777;
                 let symlink_target = if metadata.file_type().is_symlink() {
@@ -1216,21 +1219,34 @@ impl AurHelper {
             let src_path = entry.path();
             let dst_path = dst.join(entry.file_name());
 
-            if src_path.is_dir() {
+            let meta = fs::symlink_metadata(&src_path)?;
+            if meta.is_dir() {
                 self.copy_dir_recursive_with_entries(&src_path, &dst_path, files, base_dir)?;
+            } else if meta.file_type().is_symlink() {
+                let link_target = fs::read_link(&src_path)?;
+                std::os::unix::fs::symlink(&link_target, &dst_path)?;
+
+                let hash = self.compute_hash_for_path(&dst_path)?;
+                let relative_path = dst_path
+                    .strip_prefix(base_dir)
+                    .unwrap_or(&dst_path)
+                    .to_string_lossy()
+                    .to_string();
+
+                files.push(FileEntry {
+                    path: relative_path,
+                    hash,
+                    size: 0,
+                    mode: 0o120000,
+                    symlink_target: Some(link_target.to_string_lossy().to_string()),
+                    source_path: Some(dst_path.to_string_lossy().to_string()),
+                });
             } else {
                 fs::copy(&src_path, &dst_path)?;
 
-                if let Ok(metadata) = fs::metadata(&dst_path) {
+                if let Ok(metadata) = fs::symlink_metadata(&dst_path) {
                     let hash = self.compute_hash_for_path(&dst_path)?;
                     let mode = metadata.permissions().mode() & 0o7777;
-                    let symlink_target = if metadata.file_type().is_symlink() {
-                        fs::read_link(&dst_path)
-                            .ok()
-                            .map(|p| p.to_string_lossy().to_string())
-                    } else {
-                        None
-                    };
 
                     let relative_path = dst_path
                         .strip_prefix(base_dir)
@@ -1243,7 +1259,7 @@ impl AurHelper {
                         hash,
                         size: metadata.len(),
                         mode,
-                        symlink_target,
+                        symlink_target: None,
                         source_path: Some(dst_path.to_string_lossy().to_string()),
                     });
                 }
@@ -1375,7 +1391,10 @@ impl Bubblewrap {
 
             entry.unpack(&full_path)?;
 
-            if let Ok(metadata) = fs::metadata(&full_path) {
+            if let Ok(metadata) = fs::symlink_metadata(&full_path) {
+                if metadata.is_dir() {
+                    continue;
+                }
                 let hash = self.compute_hash_for_path(&full_path)?;
                 let mode = metadata.permissions().mode() & 0o7777;
                 let symlink_target = if metadata.file_type().is_symlink() {

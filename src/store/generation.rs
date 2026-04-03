@@ -43,6 +43,7 @@ impl GenerationStore {
     {
         let id = self.next_id()?;
         let gen_path = self.path(id);
+        fs::create_dir_all(&gen_path);
 
         for file in files {
             let target = gen_path.join(file.path.trim_start_matches('/'));
