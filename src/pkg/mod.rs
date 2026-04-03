@@ -117,6 +117,7 @@ pub struct PackageInfo {
     pub description: Option<String>,
     pub dependencies: Vec<String>,
     pub optional_deps: Vec<String>,
+    pub provides: Vec<String>,
     pub size: u64,
     pub installed: bool,
     pub ty: PackageType,
@@ -149,11 +150,7 @@ impl PackageInfo {
     }
 
     pub fn is_aur(&self) -> bool {
-        matches!(self.source, PackageSource::Aur)
-            || matches!(
-                self.ty,
-                PackageType::Aur
-            )
+        matches!(self.source, PackageSource::Aur) || matches!(self.ty, PackageType::Aur)
     }
 }
 
@@ -243,6 +240,10 @@ impl PackageManagerFactory {
     }
 
     pub fn pacman_manager(&self) -> &dyn PackageManager {
+        &self.pacman
+    }
+
+    pub fn pacman(&self) -> &Pacman {
         &self.pacman
     }
 

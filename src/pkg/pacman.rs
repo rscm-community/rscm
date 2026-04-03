@@ -229,6 +229,16 @@ impl Pacman {
 
         let dependencies: Vec<String> = info_map
             .get("DEPENDS")
+            .map(|s| {
+                s.lines()
+                    .filter(|line| !line.contains(".so"))
+                    .map(String::from)
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let provides: Vec<String> = info_map
+            .get("PROVIDES")
             .map(|s| s.lines().map(String::from).collect())
             .unwrap_or_default();
 
@@ -249,6 +259,7 @@ impl Pacman {
             description: info_map.get("DESC").cloned(),
             dependencies,
             optional_deps,
+            provides,
             size,
             installed: self.exists_in_db(package_name),
             ty: PackageType::Pacman,
@@ -264,6 +275,113 @@ impl Pacman {
                 return Ok(Some(info));
             }
         }
+        Ok(None)
+    }
+
+    pub fn find_package_by_provides(&self, virtual_name: &str) -> Result<Option<PackageInfo>> {
+        for repo in REPOS {
+            let db_path = self.download_repo_db(repo)?;
+            if let Some(info) = self.find_package_in_db_by_provides(&db_path, virtual_name)? {
+                return Ok(Some(info));
+            }
+        }
+        Ok(None)
+    }
+
+    fn find_package_in_db_by_provides(
+        &self,
+        db_path: &Path,
+        virtual_name: &str,
+    ) -> Result<Option<PackageInfo>> {
+        let mut raw_content = Vec::new();
+        File::open(db_path)?.read_to_end(&mut raw_content)?;
+
+        let decompressed: Box<dyn Read> = if db_path.to_string_lossy().ends_with(".zst") {
+            let decoder = zstd::stream::Decoder::new(raw_content.as_slice())?;
+            Box::new(std::io::BufReader::new(decoder))
+        } else if db_path.to_string_lossy().ends_with(".gz") {
+            let decoder = flate2::read::GzDecoder::new(raw_content.as_slice());
+            Box::new(decoder)
+        } else {
+            if raw_content.len() >= 2 && raw_content[0] == 0x1f && raw_content[1] == 0x8b {
+                let decoder = flate2::read::GzDecoder::new(raw_content.as_slice());
+                Box::new(decoder)
+            } else {
+                if raw_content.len() >= 4
+                    && raw_content[0] == 0xFD
+                    && raw_content[1] == 0x2F
+                    && raw_content[2] == 0xB5
+                    && raw_content[3] == 0x28
+                {
+                    let decoder = zstd::stream::Decoder::new(raw_content.as_slice())?;
+                    Box::new(std::io::BufReader::new(decoder))
+                } else {
+                    Box::new(std::io::Cursor::new(raw_content))
+                }
+            }
+        };
+
+        let mut archive = tar::Archive::new(decompressed);
+        let entries = archive.entries()?;
+
+        for entry in entries {
+            let mut entry = match entry {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            let path_str = entry.path_bytes().to_vec();
+            let path_str = String::from_utf8_lossy(&path_str);
+
+            if path_str.ends_with("/desc") {
+                let mut content = Vec::new();
+                entry.read_to_end(&mut content)?;
+                let content_str = String::from_utf8_lossy(&content);
+
+                let mut info_map: HashMap<String, String> = HashMap::new();
+                let mut current_key = String::new();
+                let mut current_value = String::new();
+
+                for line in content_str.lines() {
+                    if line.starts_with('%') && line.ends_with('%') {
+                        if !current_key.is_empty() {
+                            info_map.insert(current_key.clone(), current_value.trim().to_string());
+                        }
+                        current_key = line.trim_matches('%').to_string();
+                        current_value.clear();
+                    } else if !current_key.is_empty() {
+                        if !current_value.is_empty() {
+                            current_value.push('\n');
+                        }
+                        current_value.push_str(line);
+                    }
+                }
+                if !current_key.is_empty() {
+                    info_map.insert(current_key, current_value.trim().to_string());
+                }
+
+                if let Some(provides_str) = info_map.get("PROVIDES") {
+                    for prov in provides_str.lines() {
+                        let prov_clean: String = prov
+                            .split(|c: char| c == '<' || c == '>' || c == '=' || c == ' ')
+                            .next()
+                            .unwrap_or(prov)
+                            .trim()
+                            .to_string();
+                        if prov_clean == virtual_name {
+                            let path_str_owned = path_str.to_string();
+                            if let Some(pkg_dir) = path_str_owned.split('/').next() {
+                                let pkg_name = pkg_dir
+                                    .rsplit_once('-')
+                                    .map(|(n, _)| n.to_string())
+                                    .unwrap_or_else(|| pkg_dir.to_string());
+                                return self.parse_desc_file(&content_str, &pkg_name);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         Ok(None)
     }
 
@@ -283,6 +401,7 @@ impl Pacman {
                 description: None,
                 dependencies: pkg.dependencies.clone(),
                 optional_deps: vec![],
+                provides: vec![],
                 size: 0,
                 installed: true,
                 ty: PackageType::Pacman,
@@ -440,6 +559,7 @@ impl Pacman {
                     description: None,
                     dependencies: pkg.dependencies.clone(),
                     optional_deps: vec![],
+                    provides: vec![],
                     size: 0,
                     installed: true,
                     ty: PackageType::Pacman,
@@ -613,6 +733,7 @@ impl Pacman {
                     description: pkg_info.description,
                     dependencies: pkg_info.dependencies,
                     optional_deps: pkg_info.optional_deps,
+                    provides: pkg_info.provides,
                     size: pkg_info.size,
                     installed: true,
                     ty: PackageType::Pacman,
@@ -809,6 +930,7 @@ impl Pacman {
             description: pkg_info.description,
             dependencies: pkg_info.dependencies,
             optional_deps: pkg_info.optional_deps,
+            provides: pkg_info.provides,
             size: pkg_info.size,
             installed: true,
             ty: PackageType::Pacman,
@@ -985,7 +1107,7 @@ impl Pacman {
                 let line = line.trim();
                 if let Some(val) = line.strip_prefix("depend = ") {
                     let dep = val.trim().to_string();
-                    if !dep.is_empty() {
+                    if !dep.is_empty() && !dep.contains(".so") {
                         dependencies.push(dep);
                     }
                 } else if let Some(val) = line.strip_prefix("optdepend = ") {
@@ -1021,6 +1143,7 @@ impl Pacman {
             description,
             dependencies,
             optional_deps,
+            provides,
             size: file_size,
             installed: false,
             ty: PackageType::Pacman,

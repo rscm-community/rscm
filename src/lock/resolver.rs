@@ -49,6 +49,7 @@ pub struct Resolver {
     resolved: HashMap<String, LockedPackage>,
     by_name: HashMap<String, Vec<String>>,
     pending: HashSet<String>,
+    provides_map: HashMap<String, String>,
 }
 
 #[derive(Clone, Debug)]
@@ -64,6 +65,7 @@ impl Resolver {
             resolved: HashMap::new(),
             by_name: HashMap::new(),
             pending: HashSet::new(),
+            provides_map: HashMap::new(),
         }
     }
 
@@ -144,7 +146,15 @@ impl Resolver {
 
         self.pending.insert(key.clone());
 
-        let info = self.query_package(name, version)?;
+        let resolve_name = self.resolve_provides_name(name)?;
+        let info = self.query_package(&resolve_name, version)?;
+
+        for prov in &info.provides {
+            let prov_clean = Self::normalize_dep_name(prov);
+            self.provides_map
+                .entry(prov_clean)
+                .or_insert_with(|| info.name.clone());
+        }
 
         let actual_key = format!("{}:{}", info.name, info.version);
 
@@ -190,7 +200,7 @@ impl Resolver {
     }
 
     fn query_package(&self, name: &str, version: Option<&str>) -> Result<PackageInfo> {
-        let pacman_config = PackageConfig {
+        let package_config = PackageConfig {
             name: name.to_string(),
             version: version.map(String::from),
             build_type: crate::pkg::BuildType::Pacman,
@@ -198,7 +208,7 @@ impl Resolver {
             sandbox_config: None,
         };
 
-        if let Ok(pacman) = self.factory.for_package(&pacman_config) {
+        if let Ok(pacman) = self.factory.for_package(&package_config) {
             println!(
                 "Querying package info for {}, using pacman (version: {:?})",
                 name, version
@@ -218,6 +228,10 @@ impl Resolver {
             }
         }
 
+        if let Some(info) = self.factory.pacman().find_package_by_provides(name)? {
+            return Ok(info);
+        }
+
         Err(anyhow!("Package not found: {}", name))
     }
 
@@ -227,6 +241,14 @@ impl Resolver {
             .unwrap_or(dep)
             .trim()
             .to_string()
+    }
+
+    fn resolve_provides_name(&self, name: &str) -> Result<String> {
+        let normalized = Self::normalize_dep_name(name);
+        if let Some(real_pkg) = self.provides_map.get(&normalized) {
+            return Ok(real_pkg.clone());
+        }
+        Ok(normalized)
     }
 
     pub fn resolve_incremental(

@@ -24,6 +24,7 @@ pub struct PkgBuildInfo {
     pub description: Option<String>,
     pub depends: Vec<String>,
     pub makedepends: Vec<String>,
+    pub provides: Vec<String>,
     pub source: Vec<(String, Option<String>)>,
     pub md5sums: Vec<Option<String>>,
 }
@@ -36,6 +37,7 @@ impl PkgBuildInfo {
         let mut description = None;
         let mut depends = Vec::new();
         let mut makedepends = Vec::new();
+        let mut provides = Vec::new();
         let mut source = Vec::new();
         let mut md5sums = Vec::new();
 
@@ -66,10 +68,19 @@ impl PkgBuildInfo {
                 }
             } else if line.starts_with("depends=") {
                 let deps = line.trim_start_matches("depends=").trim();
-                depends = Self::parse_array(deps);
+                depends = Self::parse_array(deps)
+                    .into_iter()
+                    .filter(|d| !d.contains(".so"))
+                    .collect();
             } else if line.starts_with("makedepends=") {
                 let deps = line.trim_start_matches("makedepends=").trim();
-                makedepends = Self::parse_array(deps);
+                makedepends = Self::parse_array(deps)
+                    .into_iter()
+                    .filter(|d| !d.contains(".so"))
+                    .collect();
+            } else if line.starts_with("provides=") {
+                let provs = line.trim_start_matches("provides=").trim();
+                provides = Self::parse_array(provs);
             } else if line.starts_with("source=") {
                 let src = line.trim_start_matches("source=").trim();
                 source = Self::parse_array(src)
@@ -104,6 +115,7 @@ impl PkgBuildInfo {
             description,
             depends,
             makedepends,
+            provides,
             source,
             md5sums,
         })
@@ -233,6 +245,16 @@ impl AurHelper {
             .map(|arr| {
                 arr.iter()
                     .filter_map(|v| v.as_str().map(String::from))
+                    .filter(|d| !d.contains(".so"))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let provides: Vec<String> = pkg["Provides"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
                     .collect()
             })
             .unwrap_or_default();
@@ -246,6 +268,7 @@ impl AurHelper {
             description,
             dependencies,
             optional_deps: vec![],
+            provides,
             size: 0,
             installed: self.exists_in_store(name),
             ty: PackageType::Aur,
@@ -453,6 +476,7 @@ impl AurHelper {
             description: info.description.clone(),
             dependencies: all_deps,
             optional_deps: vec![],
+            provides: info.provides.clone(),
             size: 0,
             installed: self.exists_in_store(&info.name),
             ty: PackageType::Aur,
