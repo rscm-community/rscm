@@ -43,11 +43,17 @@ impl GenerationStore {
     {
         let id = self.next_id()?;
         let gen_path = self.path(id);
-        fs::create_dir_all(&gen_path);
+        fs::create_dir_all(&gen_path)?;
 
         for file in files {
             let target = gen_path.join(file.path.trim_start_matches('/'));
             if let Some(target_path) = &file.symlink_target {
+                if target.exists() || target.is_symlink() {
+                    continue;
+                }
+                if let Some(parent) = target.parent() {
+                    fs::create_dir_all(parent)?;
+                }
                 std::os::unix::fs::symlink(target_path, &target)?;
             } else {
                 linker(&file.source_path, &target)?;
