@@ -256,6 +256,8 @@ impl Store {
             SystemConfigApplier::apply(&system_config)?;
         }
 
+        Self::setup_fonts(&gen_path)?;
+
         println!("Switched to generation {}", id);
         if !rscm_path.is_empty() {
             println!("PATH prepended: {}", rscm_path);
@@ -269,6 +271,55 @@ impl Store {
         if !rscm_pkgconfig_path.is_empty() {
             println!("PKG_CONFIG_PATH prepended: {}", rscm_pkgconfig_path);
         }
+
+        Ok(())
+    }
+
+    fn setup_fonts(gen_path: &Path) -> Result<()> {
+        let fonts_dir = gen_path.join("share/fonts");
+        let local_fonts_dir = gen_path.join("share/local/fonts");
+
+        let mut font_paths = Vec::new();
+        if fonts_dir.exists() {
+            font_paths.push(fonts_dir);
+        }
+        if local_fonts_dir.exists() {
+            font_paths.push(local_fonts_dir);
+        }
+
+        if font_paths.is_empty() {
+            return Ok(());
+        }
+
+        let fonts_conf_dir = Path::new("/etc/fonts/conf.d");
+        fs::create_dir_all(fonts_conf_dir)?;
+
+        let rscm_fonts_conf_path = fonts_conf_dir.join("99-rscm-fonts.conf");
+        if rscm_fonts_conf_path.exists() || rscm_fonts_conf_path.is_symlink() {
+            fs::remove_file(&rscm_fonts_conf_path)?;
+        }
+
+        let mut conf_content = String::from("<?xml version=\"1.0\"?>\n<!DOCTYPE fontconfig SYSTEM \"urn:publicid:-//IDN fontconfig.org//DTD fontconfig files XML//1.0//EN\">\n<fontconfig>\n");
+        conf_content.push_str("  <!-- Managed by rscm - do not edit manually -->\n");
+
+        for font_path in &font_paths {
+            let path_str = font_path.to_string_lossy();
+            conf_content.push_str(&format!("  <dir>{}</dir>\n", path_str));
+        }
+
+        conf_content.push_str("</fontconfig>\n");
+
+        fs::write(&rscm_fonts_conf_path, conf_content)?;
+
+        println!("Added font directories:");
+        for font_path in &font_paths {
+            println!("  {}", font_path.display());
+        }
+
+        std::process::Command::new("fc-cache")
+            .arg("-f")
+            .status()
+            .ok();
 
         Ok(())
     }
