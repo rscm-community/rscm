@@ -42,11 +42,16 @@ impl LockManager {
         }
 
         let old_lock = tracker.load()?;
+        let mirrors = config
+            .system
+            .as_ref()
+            .and_then(|s| s.pacman_mirrors.clone());
         let lock_file = tracker.resolve(
             &config,
             &config_content,
             self.store_root.clone(),
             incremental,
+            mirrors,
         )?;
 
         if let Some(old) = old_lock {
@@ -124,7 +129,17 @@ impl LockManager {
             .load()?
             .ok_or_else(|| anyhow!("No lock file found"))?;
 
-        let new_lock = tracker.resolve(&config, &config_content, self.store_root.clone(), true)?;
+        let mirrors = config
+            .system
+            .as_ref()
+            .and_then(|s| s.pacman_mirrors.clone());
+        let new_lock = tracker.resolve(
+            &config,
+            &config_content,
+            self.store_root.clone(),
+            true,
+            mirrors,
+        )?;
         let delta = tracker.compute_delta(&current, &new_lock);
 
         if delta.is_empty() {

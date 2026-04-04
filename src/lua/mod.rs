@@ -458,6 +458,7 @@ impl<'a> LuaEngine {
         config.cleanup = section
             .get::<std::collections::HashMap<String, String>>("cleanup")
             .ok();
+        config.pacman_mirrors = section.get::<Vec<String>>("pacman_mirrors").ok();
         Ok(config)
     }
     pub fn parse_packages(&self, section: Table) -> Result<PackageConfig> {

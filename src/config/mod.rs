@@ -324,6 +324,7 @@ pub struct SystemConfig {
     pub limits: Option<HashMap<String, String>>,
     pub sysctl: Option<HashMap<String, String>>,
     pub cleanup: Option<HashMap<String, String>>,
+    pub pacman_mirrors: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

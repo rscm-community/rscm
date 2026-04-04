@@ -1,5 +1,5 @@
 use crate::config::Configuration;
-use crate::pkg::{PackageConfig, PackageInfo, PackageManagerFactory};
+use crate::pkg::{PackageConfig, PackageInfo, PackageManagerFactory, DEFAULT_MIRROR_URL};
 use anyhow::{anyhow, Result};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
@@ -59,9 +59,10 @@ struct PackageKey {
 }
 
 impl Resolver {
-    pub fn new(store_root: std::path::PathBuf) -> Self {
+    pub fn new(store_root: std::path::PathBuf, mirrors: Option<Vec<String>>) -> Self {
+        let mirrors = mirrors.unwrap_or_else(|| vec![DEFAULT_MIRROR_URL.to_string()]);
         Self {
-            factory: PackageManagerFactory::new(store_root),
+            factory: PackageManagerFactory::with_mirrors(store_root, mirrors),
             resolved: HashMap::new(),
             by_name: HashMap::new(),
             pending: HashSet::new(),

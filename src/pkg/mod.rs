@@ -4,6 +4,8 @@ pub mod lock;
 pub mod pacman;
 pub mod privilege;
 
+pub use pacman::DEFAULT_MIRROR_URL;
+
 use crate::store::package::FileEntry;
 use crate::store::Package;
 use anyhow::{anyhow, Result};
@@ -218,7 +220,21 @@ pub struct PackageManagerFactory {
 
 impl PackageManagerFactory {
     pub fn new(store_root: PathBuf) -> Self {
-        let pacman = Pacman::new(store_root.clone());
+        let pacman =
+            Pacman::new(store_root.clone()).with_mirrors(vec![DEFAULT_MIRROR_URL.to_string()]);
+        let aur_helper = AurHelper::detect(store_root.clone()).map(|helper| {
+            AurHelper::new(
+                helper.build_dir().clone(),
+                helper.pkg_dest().clone(),
+                store_root,
+            )
+        });
+
+        Self { pacman, aur_helper }
+    }
+
+    pub fn with_mirrors(store_root: PathBuf, mirrors: Vec<String>) -> Self {
+        let pacman = Pacman::new(store_root.clone()).with_mirrors(mirrors);
         let aur_helper = AurHelper::detect(store_root.clone()).map(|helper| {
             AurHelper::new(
                 helper.build_dir().clone(),
