@@ -850,22 +850,16 @@ impl<'a> LuaEngine {
 
     fn parse_loader(&self, section: Table) -> Result<crate::config::LoaderConfig> {
         let mut config = crate::config::LoaderConfig::default();
-        config.ty = section.get::<String>("type").ok();
-
         if let Ok(systemd_boot_section) = section.get::<Table>("systemdBoot") {
             config.systemd_boot = Some(self.parse_systemd_boot(systemd_boot_section)?);
         }
-
-        if let Ok(grub_section) = section.get::<Table>("grub") {
-            config.grub = Some(self.parse_grub(grub_section)?);
-        }
-
         Ok(config)
     }
 
     fn parse_systemd_boot(&self, section: Table) -> Result<crate::config::SystemdBootConfig> {
         let mut config = crate::config::SystemdBootConfig::default();
         config.enable = section.get::<bool>("enable").ok();
+        config.install = section.get::<bool>("install").ok();
         config.configuration_limit = section
             .get::<f64>("configurationLimit")
             .map(|v| v as u32)
@@ -873,20 +867,6 @@ impl<'a> LuaEngine {
             .or_else(|| section.get::<u32>("configurationLimit").ok());
         Ok(config)
     }
-
-    fn parse_grub(&self, section: Table) -> Result<crate::config::GrubConfig> {
-        let mut config = crate::config::GrubConfig::default();
-        config.enable = section.get::<bool>("enable").ok();
-        config.device = section.get::<String>("device").ok();
-        config.efi_support = section.get::<bool>("efiSupport").ok();
-        config.configuration_limit = section
-            .get::<f64>("configurationLimit")
-            .map(|v| v as u32)
-            .ok()
-            .or_else(|| section.get::<u32>("configurationLimit").ok());
-        Ok(config)
-    }
-
     pub fn parse_programs(
         &self,
         section: Table,

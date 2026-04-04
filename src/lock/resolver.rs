@@ -134,6 +134,30 @@ impl Resolver {
                 }
             }
         }
+
+        if let Some(ref boot) = config.boot {
+            if let Some(ref kernel) = boot.kernel {
+                if let Some(ref pkg) = kernel.package {
+                    if seen.insert(pkg.clone()) {
+                        packages.push(PackageKey {
+                            name: pkg.clone(),
+                            version: None,
+                        });
+                    }
+                }
+                if let Some(ref pkgs) = kernel.packages {
+                    for pkg_name in pkgs {
+                        if seen.insert(pkg_name.clone()) {
+                            packages.push(PackageKey {
+                                name: pkg_name.clone(),
+                                version: None,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
         packages
     }
 

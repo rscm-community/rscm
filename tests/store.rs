@@ -44,6 +44,7 @@ fn test_generation_store() -> Result<()> {
         None,
         &std::collections::HashMap::<String, ServiceConfig>::new(),
         &std::collections::HashMap::<String, UserConfig>::new(),
+        None,
         |_hash, _target| Ok(()),
     )?;
     assert_eq!(id, 1);
