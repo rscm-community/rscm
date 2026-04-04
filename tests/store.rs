@@ -1,5 +1,5 @@
 use anyhow::Result;
-use rscm::config::{EnvironmentConfig, ServiceConfig};
+use rscm::config::{EnvironmentConfig, ServiceConfig, UserConfig};
 use rscm::store::generation::GenerationManifest;
 use rscm::store::*;
 use std::fs;
@@ -43,6 +43,7 @@ fn test_generation_store() -> Result<()> {
         EnvironmentConfig::default(),
         None,
         &std::collections::HashMap::<String, ServiceConfig>::new(),
+        &std::collections::HashMap::<String, UserConfig>::new(),
         |_hash, _target| Ok(()),
     )?;
     assert_eq!(id, 1);
