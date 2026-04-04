@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use crate::config::Configuration;
 use crate::lock::LockFile;
 use crate::pkg::{BuildType, PackageConfig, PackageManagerFactory};
+use crate::service::ServiceApplier;
 use crate::store::generation::GenerationManifest;
 use crate::system_config::SystemConfigApplier;
 
@@ -118,6 +119,7 @@ impl Store {
             &files,
             configuration.environment,
             configuration.system,
+            &configuration.services,
             |src, dst| self.content.link_to(src, dst),
         )
     }
@@ -254,6 +256,14 @@ impl Store {
             let sys_config_content = fs::read_to_string(&system_config_path)?;
             let system_config: crate::config::SystemConfig = toml::from_str(&sys_config_content)?;
             SystemConfigApplier::apply(&system_config)?;
+        }
+
+        let services_config_path = gen_path.join("services.toml");
+        if services_config_path.exists() {
+            let services_content = fs::read_to_string(&services_config_path)?;
+            let services: std::collections::HashMap<String, crate::config::ServiceConfig> =
+                toml::from_str(&services_content)?;
+            ServiceApplier::apply(&services)?;
         }
 
         Self::setup_fonts(&gen_path)?;
