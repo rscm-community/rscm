@@ -15,7 +15,6 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-const PACMAN_DB_PATH: &str = "/var/lib/pacman";
 const ARCHIVE_URL: &str = "https://archive.archlinux.org";
 const MIRROR_URL: &str = "https://geo.mirror.pkgbuild.com";
 const REPOS: &[&str] = &["core", "extra", "multilib"];
@@ -24,8 +23,6 @@ const ARCH: &str = "x86_64";
 #[derive(Debug, Clone)]
 pub struct Pacman {
     isolated_root: Option<PathBuf>,
-    isolated_db_path: Option<PathBuf>,
-    cache_dir: PathBuf,
     archive_cache_dir: PathBuf,
     repo_db_cache_dir: PathBuf,
     privilege: PrivilegeManager,
@@ -37,13 +34,9 @@ pub struct Pacman {
 impl Pacman {
     pub fn new(store_root: PathBuf) -> Self {
         let isolated_root = store_root.join("tmp/pacman");
-        let isolated_db_path = isolated_root.join("var/lib/pacman");
-        let cache_dir = isolated_root.join("var/cache/pacman/pkg");
         let archive_cache_dir = store_root.join("cache/archive");
         let repo_db_cache_dir = store_root.join("cache/repo");
 
-        fs::create_dir_all(&isolated_db_path).ok();
-        fs::create_dir_all(&cache_dir).ok();
         fs::create_dir_all(&archive_cache_dir).ok();
         fs::create_dir_all(&repo_db_cache_dir).ok();
 
@@ -52,8 +45,6 @@ impl Pacman {
 
         Self {
             isolated_root: Some(isolated_root.clone()),
-            isolated_db_path: Some(isolated_db_path),
-            cache_dir,
             archive_cache_dir,
             repo_db_cache_dir,
             privilege: PrivilegeManager::new(),
@@ -74,8 +65,6 @@ impl Pacman {
 
         Self {
             isolated_root: None,
-            isolated_db_path: None,
-            cache_dir: PathBuf::from("/var/cache/pacman/pkg"),
             archive_cache_dir,
             repo_db_cache_dir,
             privilege: PrivilegeManager::new(),

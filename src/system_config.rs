@@ -99,59 +99,101 @@ impl SystemConfigApplier {
     }
 
     fn apply_locale_gen(config: &SystemConfig) -> Result<()> {
-        if let Some(ref locales) = config.locales {
-            let locale_gen_path = Path::new("/etc/locale.gen");
-            let mut content = String::new();
+        let locale_gen_path = Path::new("/etc/locale.gen");
+        let mut content = String::new();
 
-            if locale_gen_path.exists() {
-                content = fs::read_to_string(locale_gen_path)?;
+        if locale_gen_path.exists() {
+            content = fs::read_to_string(locale_gen_path)?;
+        }
+
+        let desired_locales: Vec<(String, String)> = if let Some(ref locales) = config.locales {
+            locales
+                .iter()
+                .filter(|e| !e.trim().is_empty())
+                .map(|e| {
+                    let trimmed = e.trim().to_string();
+                    let name = trimmed
+                        .split_whitespace()
+                        .next()
+                        .unwrap_or(&trimmed)
+                        .to_string();
+                    (trimmed, name)
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        let mut lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
+
+        for line in &mut lines {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
             }
 
-            for locale_entry in locales {
-                let locale_line = locale_entry.trim();
-                if locale_line.is_empty() {
-                    continue;
-                }
+            let line_name: String = trimmed
+                .split_whitespace()
+                .next()
+                .unwrap_or(trimmed)
+                .to_string();
 
-                let locale_name: String = locale_line
-                    .split_whitespace()
-                    .next()
-                    .unwrap_or(locale_line)
-                    .to_string();
+            let is_desired = desired_locales
+                .iter()
+                .any(|(full, name)| trimmed == *full || trimmed == *name || line_name == *name);
 
-                let already_enabled = content
-                    .lines()
-                    .any(|l| l.trim() == locale_line || l.trim() == locale_name);
+            if !is_desired {
+                *line = format!("# {}", trimmed);
+            }
+        }
 
-                if !already_enabled {
-                    let commented_pattern = format!("#{}", locale_line);
-                    let commented_with_space = format!("# {}", locale_line);
-                    let commented_name = format!("#{}", locale_name);
-                    let commented_name_space = format!("# {}", locale_name);
+        for (locale_line, locale_name) in &desired_locales {
+            let already_enabled = lines.iter().any(|l| {
+                let t = l.trim();
+                t == *locale_line || t == *locale_name
+            });
 
-                    if content.contains(&commented_pattern) {
-                        content = content.replace(&commented_pattern, locale_line);
-                    } else if content.contains(&commented_with_space) {
-                        content = content.replace(&commented_with_space, locale_line);
-                    } else if content.contains(&commented_name) {
-                        content = content.replace(&commented_name, locale_line);
-                    } else if content.contains(&commented_name_space) {
-                        content = content.replace(&commented_name_space, locale_line);
-                    } else {
-                        if !content.ends_with('\n') && !content.is_empty() {
-                            content.push('\n');
-                        }
-                        content.push_str(locale_line);
-                        content.push('\n');
+            if !already_enabled {
+                let commented_pattern = format!("#{}", locale_line);
+                let commented_with_space = format!("# {}", locale_line);
+                let commented_name = format!("#{}", locale_name);
+                let commented_name_space = format!("# {}", locale_name);
+
+                let joined = lines.join("\n");
+                let new_joined = if joined.contains(&commented_pattern) {
+                    joined.replace(&commented_pattern, locale_line)
+                } else if joined.contains(&commented_with_space) {
+                    joined.replace(&commented_with_space, locale_line)
+                } else if joined.contains(&commented_name) {
+                    joined.replace(&commented_name, locale_line)
+                } else if joined.contains(&commented_name_space) {
+                    joined.replace(&commented_name_space, locale_line)
+                } else {
+                    let mut s = joined.clone();
+                    if !s.ends_with('\n') && !s.is_empty() {
+                        s.push('\n');
                     }
-                }
+                    s.push_str(locale_line);
+                    s.push('\n');
+                    s
+                };
+                lines = new_joined.lines().map(|l| l.to_string()).collect();
             }
+        }
 
-            fs::write(locale_gen_path, content)?;
+        content = lines.join("\n");
+        if !content.ends_with('\n') {
+            content.push('\n');
+        }
 
-            Command::new("locale-gen").status().ok();
+        fs::write(locale_gen_path, content)?;
 
+        Command::new("locale-gen").status().ok();
+
+        if let Some(ref locales) = config.locales {
             println!("Applied locales: {:?}", locales);
+        } else {
+            println!("Applied locales: none (cleared)");
         }
         Ok(())
     }
