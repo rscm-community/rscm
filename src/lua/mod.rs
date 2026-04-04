@@ -865,6 +865,11 @@ impl<'a> LuaEngine {
             .map(|v| v as u32)
             .ok()
             .or_else(|| section.get::<u32>("configurationLimit").ok());
+        config.timeout = section
+            .get::<f64>("timeout")
+            .map(|v| v as u32)
+            .ok()
+            .or_else(|| section.get::<u32>("timeout").ok());
         Ok(config)
     }
     pub fn parse_programs(
