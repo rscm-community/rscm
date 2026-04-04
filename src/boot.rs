@@ -25,7 +25,7 @@ impl BootApplier {
         if let Some(ref loader) = boot_config.loader {
             if let Some(ref systemd_boot) = loader.systemd_boot {
                 if systemd_boot.enable.unwrap_or(true) {
-                    if systemd_boot.install.unwrap_or(false) {
+                    if !Self::is_systemd_boot_installed() {
                         Self::install_systemd_boot()?;
                     }
                     Self::apply_systemd_boot(boot_config, systemd_boot, generation_id, gen_path)?;
@@ -36,7 +36,22 @@ impl BootApplier {
         Ok(())
     }
 
+    fn is_systemd_boot_installed() -> bool {
+        let output = std::process::Command::new("bootctl")
+            .arg("is-installed")
+            .output();
+        match output {
+            Ok(o) => o.status.success(),
+            Err(_) => false,
+        }
+    }
+
     fn install_systemd_boot() -> Result<()> {
+        if Self::is_systemd_boot_installed() {
+            println!("systemd-boot is already installed, skipping installation");
+            return Ok(());
+        }
+
         println!("Installing systemd-boot...");
 
         let output = std::process::Command::new("bootctl")

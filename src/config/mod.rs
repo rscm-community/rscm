@@ -531,7 +531,6 @@ pub struct LoaderConfig {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SystemdBootConfig {
     pub enable: Option<bool>,
-    pub install: Option<bool>,
     pub configuration_limit: Option<u32>,
 }
 
