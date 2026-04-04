@@ -1,5 +1,5 @@
 use anyhow::Result;
-use rscm::config::EnvironmentConfig;
+use rscm::config::{EnvironmentConfig, SystemConfig};
 use rscm::store::generation::GenerationManifest;
 use rscm::store::*;
 use std::fs;
@@ -41,6 +41,7 @@ fn test_generation_store() -> Result<()> {
         &[],
         &files,
         EnvironmentConfig::default(),
+        None,
         |_hash, _target| Ok(()),
     )?;
     assert_eq!(id, 1);

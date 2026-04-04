@@ -94,13 +94,10 @@ pub struct SystemConfig {
     pub timezone: Option<String>,
     pub locale: Option<String>,
     pub keymap: Option<String>,
-    pub architecture: Option<String>,
     pub locales: Option<Vec<String>>,
     pub locale_conf: Option<HashMap<String, String>>,
     pub limits: Option<HashMap<String, String>>,
     pub sysctl: Option<HashMap<String, String>>,
-    pub swap: Option<HashMap<String, String>>,
-    pub filesystems: Option<HashMap<String, String>>,
     pub cleanup: Option<HashMap<String, String>>,
 }
 

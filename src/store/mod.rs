@@ -17,6 +17,7 @@ use crate::config::Configuration;
 use crate::lock::LockFile;
 use crate::pkg::{BuildType, PackageConfig, PackageManagerFactory};
 use crate::store::generation::GenerationManifest;
+use crate::system_config::SystemConfigApplier;
 
 #[derive(Debug, Default)]
 pub struct GcResult {
@@ -116,6 +117,7 @@ impl Store {
             &package_names,
             &files,
             configuration.environment,
+            configuration.system,
             |src, dst| self.content.link_to(src, dst),
         )
     }
@@ -227,7 +229,7 @@ impl Store {
         }
         if !rscm_pkgconfig_path.is_empty() {
             variables_sh_content.push_str(&format!(
-                "export PKG_CONFIG_PATH={}:${{PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}}\n",
+                "export PKG_CONFIG_PATH={}${{PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}}\n",
                 rscm_pkgconfig_path
             ));
         }
@@ -246,6 +248,13 @@ impl Store {
             fs::remove_file(env_path)?;
         }
         std::os::unix::fs::symlink(variables_sh_path, env_path)?;
+
+        let system_config_path = gen_path.join("system_config.toml");
+        if system_config_path.exists() {
+            let sys_config_content = fs::read_to_string(&system_config_path)?;
+            let system_config: crate::config::SystemConfig = toml::from_str(&sys_config_content)?;
+            SystemConfigApplier::apply(&system_config)?;
+        }
 
         println!("Switched to generation {}", id);
         if !rscm_path.is_empty() {
