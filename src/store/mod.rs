@@ -19,6 +19,7 @@ use crate::pkg::{BuildType, PackageConfig, PackageManagerFactory};
 use crate::service::ServiceApplier;
 use crate::store::generation::GenerationManifest;
 use crate::system_config::SystemConfigApplier;
+use crate::user::UserApplier;
 
 #[derive(Debug, Default)]
 pub struct GcResult {
@@ -120,6 +121,7 @@ impl Store {
             configuration.environment,
             configuration.system,
             &configuration.services,
+            &configuration.users,
             |src, dst| self.content.link_to(src, dst),
         )
     }
@@ -264,6 +266,14 @@ impl Store {
             let services: std::collections::HashMap<String, crate::config::ServiceConfig> =
                 toml::from_str(&services_content)?;
             ServiceApplier::apply(&services)?;
+        }
+
+        let users_config_path = gen_path.join("users.toml");
+        if users_config_path.exists() {
+            let users_content = fs::read_to_string(&users_config_path)?;
+            let users: std::collections::HashMap<String, crate::config::UserConfig> =
+                toml::from_str(&users_content)?;
+            UserApplier::apply(&users)?;
         }
 
         Self::setup_fonts(&gen_path)?;

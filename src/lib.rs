@@ -8,3 +8,4 @@ pub mod service;
 pub mod store;
 pub mod system_config;
 pub mod toolchain;
+pub mod user;
