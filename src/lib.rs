@@ -5,4 +5,5 @@ pub mod lock;
 pub mod lua;
 pub mod pkg;
 pub mod store;
+pub mod system_config;
 pub mod toolchain;

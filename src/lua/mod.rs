@@ -404,7 +404,6 @@ impl<'a> LuaEngine {
         config.timezone = section.get::<String>("timezone").ok();
         config.locale = section.get::<String>("locale").ok();
         config.keymap = section.get::<String>("keymap").ok();
-        config.architecture = section.get::<String>("architecture").ok();
         config.locales = section.get::<Vec<String>>("locales").ok();
         config.locale_conf = section
             .get::<std::collections::HashMap<String, String>>("locale_conf")
