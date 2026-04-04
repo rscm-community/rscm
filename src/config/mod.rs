@@ -524,22 +524,13 @@ pub struct SystemdInitrdConfig {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LoaderConfig {
-    pub ty: Option<String>,
     pub systemd_boot: Option<SystemdBootConfig>,
-    pub grub: Option<GrubConfig>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SystemdBootConfig {
     pub enable: Option<bool>,
-    pub configuration_limit: Option<u32>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct GrubConfig {
-    pub enable: Option<bool>,
-    pub device: Option<String>,
-    pub efi_support: Option<bool>,
+    pub install: Option<bool>,
     pub configuration_limit: Option<u32>,
 }
 

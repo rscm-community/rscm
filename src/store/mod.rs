@@ -13,6 +13,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::boot::BootApplier;
 use crate::config::Configuration;
 use crate::lock::LockFile;
 use crate::pkg::{BuildType, PackageConfig, PackageManagerFactory};
@@ -76,11 +77,18 @@ impl Store {
     ) -> Result<u64> {
         let mut files = Vec::new();
         let mut package_names = Vec::new();
+        let mut kernel_packages: Vec<String> = Vec::new();
 
         for (name, pkg_versions) in &lock.packages {
             for (version_key, pkg_version) in &pkg_versions.versions {
                 let full_name = format!("{}-{}", name, version_key);
                 package_names.push(full_name.clone());
+
+                let is_kernel =
+                    name == "linux" || name.starts_with("linux-") || name.starts_with("linux_");
+                if is_kernel {
+                    kernel_packages.push(name.clone());
+                }
 
                 if let Some(pkg) = self.packages.get(name)? {
                     for file in &pkg.files {
@@ -104,7 +112,7 @@ impl Store {
                     };
 
                     let manager = self.pkg_factory.for_package(&config)?;
-                    let info = manager.install(&config, false)?;
+                    let _info = manager.install(&config, false)?;
 
                     if let Some(pkg) = self.packages.get(name)? {
                         for file in &pkg.files {
@@ -115,15 +123,168 @@ impl Store {
             }
         }
 
-        self.generations.create(
+        let boot_config = configuration.boot.clone();
+        let id = self.generations.create(
             &package_names,
             &files,
             configuration.environment,
             configuration.system,
             &configuration.services,
             &configuration.users,
+            configuration.boot,
             |src, dst| self.content.link_to(src, dst),
-        )
+        )?;
+
+        if !kernel_packages.is_empty() {
+            let gen_path = self.generations.path(id);
+            if let Err(e) =
+                Self::generate_initramfs(&gen_path, &kernel_packages, boot_config.as_ref())
+            {
+                eprintln!("Warning: initramfs generation failed: {}", e);
+            }
+        }
+
+        Ok(id)
+    }
+
+    fn generate_initramfs(
+        gen_path: &Path,
+        kernel_packages: &[String],
+        boot_config: Option<&crate::config::BootConfig>,
+    ) -> Result<()> {
+        let modules_dir = gen_path.join("usr/lib/modules");
+        if !modules_dir.exists() {
+            return Err(anyhow::anyhow!(
+                "No kernel modules found in generation at {}",
+                modules_dir.display()
+            ));
+        }
+
+        let mut kernel_version: Option<String> = None;
+
+        if let Some(ref boot) = boot_config {
+            if let Some(ref kernel) = boot.kernel {
+                if let Some(ref pkg) = kernel.package {
+                    for entry in fs::read_dir(&modules_dir)? {
+                        let entry = entry?;
+                        if !entry.path().is_dir() {
+                            continue;
+                        }
+                        let ver = entry.file_name().to_string_lossy().to_string();
+                        let matches = match pkg.as_str() {
+                            "linux" => {
+                                !ver.contains("lts")
+                                    && !ver.contains("hardened")
+                                    && !ver.contains("zen")
+                            }
+                            "linux-lts" => ver.contains("lts"),
+                            "linux-hardened" => ver.contains("hardened"),
+                            "linux-zen" => ver.contains("zen"),
+                            other => {
+                                ver.contains(&other.replace("linux-", "").replace("linux_", ""))
+                            }
+                        };
+                        if matches {
+                            kernel_version = Some(ver);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        if kernel_version.is_none() {
+            for entry in fs::read_dir(&modules_dir)? {
+                let entry = entry?;
+                if entry.path().is_dir() {
+                    kernel_version = Some(entry.file_name().to_string_lossy().to_string());
+                    break;
+                }
+            }
+        }
+
+        let kernel_version = match kernel_version {
+            Some(v) => v,
+            None => return Err(anyhow::anyhow!("No kernel version found in generation")),
+        };
+
+        println!("Generating initramfs for kernel {}...", kernel_version);
+
+        let gen_boot = gen_path.join("boot");
+        fs::create_dir_all(&gen_boot)?;
+
+        let initramfs_name = if kernel_packages.iter().any(|p| p == "linux") {
+            "initramfs-linux.img"
+        } else if kernel_packages.iter().any(|p| p == "linux-lts") {
+            "initramfs-linux-lts.img"
+        } else {
+            "initramfs.img"
+        };
+        let initramfs_path = gen_boot.join(initramfs_name);
+
+        let mut cmd = std::process::Command::new("mkinitcpio");
+        cmd.arg("-k").arg(&kernel_version);
+        cmd.arg("-r").arg(gen_path);
+        cmd.arg("-g").arg(&initramfs_path);
+
+        if let Some(ref boot) = boot_config {
+            if let Some(ref initrd) = boot.initrd {
+                if let Some(ref modules) = initrd.kernel_modules {
+                    if !modules.is_empty() {
+                        let temp_conf = gen_path.join("mkinitcpio.conf");
+                        let mut conf_content = String::new();
+                        conf_content.push_str("MODULES=(");
+                        conf_content.push_str(&modules.join(" "));
+                        conf_content.push_str(")\n");
+                        conf_content.push_str("HOOKS=(base udev autodetect modconf block filesystems keyboard fsck)\n");
+                        conf_content.push_str("BINARIES=()\n");
+                        conf_content.push_str("FILES=()\n");
+                        conf_content.push_str("COMPRESSION=\"zstd\"\n");
+                        fs::write(&temp_conf, conf_content)?;
+                        cmd.arg("-c").arg(&temp_conf);
+                    }
+                }
+            }
+        }
+
+        let output = cmd.output()?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow::anyhow!(
+                "mkinitcpio failed for kernel {}: {}",
+                kernel_version,
+                stderr
+            ));
+        }
+
+        if !initramfs_path.exists() {
+            return Err(anyhow::anyhow!(
+                "mkinitcpio succeeded but initramfs was not created at {}",
+                initramfs_path.display()
+            ));
+        }
+
+        println!("Generated initramfs at {}", initramfs_path.display());
+
+        let fallback_name = initramfs_name.replace(".img", "-fallback.img");
+        let fallback_path = gen_boot.join(&fallback_name);
+
+        let mut fallback_cmd = std::process::Command::new("mkinitcpio");
+        fallback_cmd.arg("-k").arg(&kernel_version);
+        fallback_cmd.arg("-r").arg(gen_path);
+        fallback_cmd.arg("-g").arg(&fallback_path);
+        fallback_cmd.arg("-S");
+
+        if let Ok(output) = fallback_cmd.output() {
+            if output.status.success() && fallback_path.exists() {
+                println!(
+                    "Generated fallback initramfs at {}",
+                    fallback_path.display()
+                );
+            }
+        }
+
+        Ok(())
     }
 
     pub fn activate_generation(&self, id: u64) -> Result<()> {
@@ -274,6 +435,15 @@ impl Store {
             let users: std::collections::HashMap<String, crate::config::UserConfig> =
                 toml::from_str(&users_content)?;
             UserApplier::apply(&users)?;
+        }
+
+        let boot_config_path = gen_path.join("boot_config.toml");
+        if boot_config_path.exists() {
+            let boot_content = fs::read_to_string(&boot_config_path)?;
+            let boot_config: crate::config::BootConfig = toml::from_str(&boot_content)?;
+            if let Err(e) = BootApplier::apply(&boot_config, id, &gen_path) {
+                eprintln!("Warning: Boot configuration failed: {}", e);
+            }
         }
 
         Self::setup_fonts(&gen_path)?;

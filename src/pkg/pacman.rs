@@ -994,7 +994,16 @@ impl Pacman {
 
         if let Some(ref script) = install_script {
             if script.functions.iter().any(|f| f == "post_install") {
-                execute_post_install(script, name, &ver)?;
+                let is_kernel =
+                    name == "linux" || name.starts_with("linux-") || name.starts_with("linux_");
+                if !is_kernel {
+                    execute_post_install(script, name, &ver)?;
+                } else {
+                    println!(
+                        "Skipping post_install hook for kernel package: {} (managed by rscm boot)",
+                        name
+                    );
+                }
             }
         }
 

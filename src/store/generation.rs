@@ -5,11 +5,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use crate::config::{EnvironmentConfig, ServiceConfig, SystemConfig, UserConfig};
+use crate::config::{BootConfig, EnvironmentConfig, ServiceConfig, SystemConfig, UserConfig};
 
 const SYSTEM_CONFIG_FILE: &str = "system_config.toml";
 const SERVICES_CONFIG_FILE: &str = "services.toml";
 const USERS_CONFIG_FILE: &str = "users.toml";
+const BOOT_CONFIG_FILE: &str = "boot_config.toml";
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct GenerationManifest {
@@ -43,6 +44,7 @@ impl GenerationStore {
         system_config: Option<SystemConfig>,
         services_config: &HashMap<String, ServiceConfig>,
         users_config: &HashMap<String, UserConfig>,
+        boot_config: Option<BootConfig>,
         linker: F,
     ) -> Result<u64>
     where
@@ -105,6 +107,11 @@ impl GenerationStore {
         if !users_config.is_empty() {
             let users_content = toml::to_string_pretty(users_config)?;
             fs::write(gen_path.join(USERS_CONFIG_FILE), users_content)?;
+        }
+
+        if let Some(ref boot_cfg) = boot_config {
+            let boot_content = toml::to_string_pretty(boot_cfg)?;
+            fs::write(gen_path.join(BOOT_CONFIG_FILE), boot_content)?;
         }
 
         let manifest = GenerationManifest {

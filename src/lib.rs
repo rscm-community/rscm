@@ -1,3 +1,4 @@
+pub mod boot;
 pub mod cache;
 pub mod cli;
 pub mod config;
