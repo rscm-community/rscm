@@ -464,7 +464,7 @@ fn load_config(config_path: PathBuf) -> Result<Configuration> {
 
     let engine = LuaEngine::new()?;
 
-    engine.load_config(&content)
+    engine.load_config(&content, &config_path)
 }
 
 fn build_system(system: Option<String>) -> Result<u64> {
