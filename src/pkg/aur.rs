@@ -18,6 +18,34 @@ use which::which;
 pub const AUR_DB_URL: &str = "https://aur.archlinux.org/cgit/aur.git/plain/PKGBUILD";
 pub const AUR_RPC_URL: &str = "https://aur.archlinux.org/rpc.php";
 
+fn ensure_git() -> Result<()> {
+    if which("git").is_ok() {
+        return Ok(());
+    }
+
+    println!("git not found, installing temporarily...");
+
+    let temp_store_root = std::env::temp_dir().join("rscm-temp-git");
+    let pacman = Pacman::new(temp_store_root);
+
+    let config = PackageConfig {
+        name: "git".to_string(),
+        version: None,
+        build_type: BuildType::Pacman,
+        dependencies: vec![],
+        sandbox_config: None,
+    };
+
+    pacman.install(&config, false)?;
+
+    if which("git").is_err() {
+        return Err(anyhow!("Failed to install git"));
+    }
+
+    println!("git installed successfully");
+    Ok(())
+}
+
 #[derive(Debug, Clone)]
 pub struct PkgBuildInfo {
     pub name: String,
@@ -280,6 +308,8 @@ impl AurHelper {
     }
 
     fn get_specific_version(&self, name: &str, version: &str) -> Result<Option<PackageInfo>> {
+        ensure_git()?;
+
         let repo_url = format!("https://aur.archlinux.org/{}.git", name);
         let cache_dir = self.cache_dir.join(name);
 
@@ -504,6 +534,8 @@ impl AurHelper {
     }
 
     pub fn clone_aur_package(&self, name: &str) -> Result<PathBuf> {
+        ensure_git()?;
+
         let cache_clone_dir = self.cache_dir.join(name);
         let clone_dir = self.build_dir.join(name);
 
