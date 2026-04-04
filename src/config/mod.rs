@@ -532,6 +532,7 @@ pub struct LoaderConfig {
 pub struct SystemdBootConfig {
     pub enable: Option<bool>,
     pub configuration_limit: Option<u32>,
+    pub timeout: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

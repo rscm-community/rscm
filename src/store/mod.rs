@@ -152,136 +152,153 @@ impl Store {
         kernel_packages: &[String],
         boot_config: Option<&crate::config::BootConfig>,
     ) -> Result<()> {
-        let modules_dir = gen_path.join("usr/lib/modules");
-        if !modules_dir.exists() {
-            return Err(anyhow::anyhow!(
-                "No kernel modules found in generation at {}",
-                modules_dir.display()
-            ));
-        }
+        let gen_modules_dir = gen_path.join("usr/lib/modules");
+        let system_modules_dir = Path::new("/usr/lib/modules");
 
-        let mut kernel_version: Option<String> = None;
+        let mut all_kernel_versions: Vec<String> = Vec::new();
 
-        if let Some(ref boot) = boot_config {
-            if let Some(ref kernel) = boot.kernel {
-                if let Some(ref pkg) = kernel.package {
-                    for entry in fs::read_dir(&modules_dir)? {
-                        let entry = entry?;
-                        if !entry.path().is_dir() {
-                            continue;
-                        }
-                        let ver = entry.file_name().to_string_lossy().to_string();
-                        let matches = match pkg.as_str() {
-                            "linux" => {
-                                !ver.contains("lts")
-                                    && !ver.contains("hardened")
-                                    && !ver.contains("zen")
+        if gen_modules_dir.exists() {
+            if let Ok(entries) = fs::read_dir(&gen_modules_dir) {
+                for entry in entries.flatten() {
+                    if entry.path().is_dir() {
+                        if let Some(name) = entry.file_name().to_str() {
+                            if !all_kernel_versions.contains(&name.to_string()) {
+                                all_kernel_versions.push(name.to_string());
                             }
-                            "linux-lts" => ver.contains("lts"),
-                            "linux-hardened" => ver.contains("hardened"),
-                            "linux-zen" => ver.contains("zen"),
-                            other => {
-                                ver.contains(&other.replace("linux-", "").replace("linux_", ""))
-                            }
-                        };
-                        if matches {
-                            kernel_version = Some(ver);
-                            break;
                         }
                     }
                 }
             }
         }
 
-        if kernel_version.is_none() {
-            for entry in fs::read_dir(&modules_dir)? {
-                let entry = entry?;
-                if entry.path().is_dir() {
-                    kernel_version = Some(entry.file_name().to_string_lossy().to_string());
-                    break;
-                }
-            }
-        }
-
-        let kernel_version = match kernel_version {
-            Some(v) => v,
-            None => return Err(anyhow::anyhow!("No kernel version found in generation")),
-        };
-
-        println!("Generating initramfs for kernel {}...", kernel_version);
-
-        let gen_boot = gen_path.join("boot");
-        fs::create_dir_all(&gen_boot)?;
-
-        let initramfs_name = if kernel_packages.iter().any(|p| p == "linux") {
-            "initramfs-linux.img"
-        } else if kernel_packages.iter().any(|p| p == "linux-lts") {
-            "initramfs-linux-lts.img"
-        } else {
-            "initramfs.img"
-        };
-        let initramfs_path = gen_boot.join(initramfs_name);
-
-        let mut cmd = std::process::Command::new("mkinitcpio");
-        cmd.arg("-k").arg(&kernel_version);
-        cmd.arg("-r").arg(gen_path);
-        cmd.arg("-g").arg(&initramfs_path);
-
-        if let Some(ref boot) = boot_config {
-            if let Some(ref initrd) = boot.initrd {
-                if let Some(ref modules) = initrd.kernel_modules {
-                    if !modules.is_empty() {
-                        let temp_conf = gen_path.join("mkinitcpio.conf");
-                        let mut conf_content = String::new();
-                        conf_content.push_str("MODULES=(");
-                        conf_content.push_str(&modules.join(" "));
-                        conf_content.push_str(")\n");
-                        conf_content.push_str("HOOKS=(base udev autodetect modconf block filesystems keyboard fsck)\n");
-                        conf_content.push_str("BINARIES=()\n");
-                        conf_content.push_str("FILES=()\n");
-                        conf_content.push_str("COMPRESSION=\"zstd\"\n");
-                        fs::write(&temp_conf, conf_content)?;
-                        cmd.arg("-c").arg(&temp_conf);
+        if system_modules_dir.exists() {
+            if let Ok(entries) = fs::read_dir(system_modules_dir) {
+                for entry in entries.flatten() {
+                    if entry.path().is_dir() {
+                        if let Some(name) = entry.file_name().to_str() {
+                            if !all_kernel_versions.contains(&name.to_string()) {
+                                all_kernel_versions.push(name.to_string());
+                            }
+                        }
                     }
                 }
             }
         }
 
-        let output = cmd.output()?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
+        if all_kernel_versions.is_empty() {
             return Err(anyhow::anyhow!(
-                "mkinitcpio failed for kernel {}: {}",
-                kernel_version,
-                stderr
+                "No kernel modules found in generation or system"
             ));
         }
 
-        if !initramfs_path.exists() {
-            return Err(anyhow::anyhow!(
-                "mkinitcpio succeeded but initramfs was not created at {}",
-                initramfs_path.display()
-            ));
-        }
+        for kernel_version in &all_kernel_versions {
+            println!("Generating initramfs for kernel {}...", kernel_version);
 
-        println!("Generated initramfs at {}", initramfs_path.display());
+            let gen_boot = gen_path.join("boot");
+            fs::create_dir_all(&gen_boot)?;
 
-        let fallback_name = initramfs_name.replace(".img", "-fallback.img");
-        let fallback_path = gen_boot.join(&fallback_name);
+            let temp_dir = gen_path.join("tmp_initramfs_modules");
+            let temp_modules_dir = temp_dir.join("usr/lib/modules").join(kernel_version);
+            fs::create_dir_all(&temp_modules_dir)?;
 
-        let mut fallback_cmd = std::process::Command::new("mkinitcpio");
-        fallback_cmd.arg("-k").arg(&kernel_version);
-        fallback_cmd.arg("-r").arg(gen_path);
-        fallback_cmd.arg("-g").arg(&fallback_path);
-        fallback_cmd.arg("-S");
+            let gen_kernel_modules_dir = gen_modules_dir.join(kernel_version);
+            let system_kernel_modules_dir = system_modules_dir.join(kernel_version);
 
-        if let Ok(output) = fallback_cmd.output() {
-            if output.status.success() && fallback_path.exists() {
-                println!(
-                    "Generated fallback initramfs at {}",
-                    fallback_path.display()
-                );
+            let mut module_sources: Vec<PathBuf> = Vec::new();
+            if gen_kernel_modules_dir.exists() {
+                module_sources.push(gen_kernel_modules_dir);
             }
+            if system_kernel_modules_dir.exists() {
+                module_sources.push(system_kernel_modules_dir);
+            }
+
+            for source_dir in module_sources {
+                if let Ok(entries) = fs::read_dir(&source_dir) {
+                    for entry in entries.flatten() {
+                        let entry_name = entry.file_name();
+                        let target_file = temp_modules_dir.join(&entry_name);
+                        if !target_file.exists() {
+                            let _ = std::os::unix::fs::symlink(&entry.path(), &target_file);
+                        }
+                    }
+                }
+            }
+
+            let initramfs_name = if kernel_version.contains("lts") {
+                "initramfs-linux-lts.img"
+            } else if kernel_version.contains("hardened") {
+                "initramfs-linux-hardened.img"
+            } else if kernel_version.contains("zen") {
+                "initramfs-linux-zen.img"
+            } else if kernel_packages.iter().any(|p| p == "linux") {
+                "initramfs-linux.img"
+            } else {
+                "initramfs.img"
+            };
+            let initramfs_path = gen_boot.join(initramfs_name);
+
+            let mut cmd = std::process::Command::new("mkinitcpio");
+            cmd.arg("-k").arg(&kernel_version);
+            cmd.arg("-r").arg(&temp_dir);
+            cmd.arg("-g").arg(&initramfs_path);
+
+            if let Some(ref boot) = boot_config {
+                if let Some(ref initrd) = boot.initrd {
+                    if let Some(ref modules) = initrd.kernel_modules {
+                        if !modules.is_empty() {
+                            let temp_conf = gen_path.join("mkinitcpio.conf");
+                            let mut conf_content = String::new();
+                            conf_content.push_str("MODULES=(");
+                            conf_content.push_str(&modules.join(" "));
+                            conf_content.push_str(")\n");
+                            conf_content.push_str("HOOKS=(base udev autodetect modconf block filesystems keyboard fsck)\n");
+                            conf_content.push_str("BINARIES=()\n");
+                            conf_content.push_str("FILES=()\n");
+                            conf_content.push_str("COMPRESSION=\"zstd\"\n");
+                            fs::write(&temp_conf, conf_content)?;
+                            cmd.arg("-c").arg(&temp_conf);
+                        }
+                    }
+                }
+            }
+
+            let output = cmd.output()?;
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err(anyhow::anyhow!(
+                    "mkinitcpio failed for kernel {}: {}",
+                    kernel_version,
+                    stderr
+                ));
+            }
+
+            if !initramfs_path.exists() {
+                return Err(anyhow::anyhow!(
+                    "mkinitcpio succeeded but initramfs was not created at {}",
+                    initramfs_path.display()
+                ));
+            }
+
+            println!("Generated initramfs at {}", initramfs_path.display());
+
+            let fallback_name = initramfs_name.replace(".img", "-fallback.img");
+            let fallback_path = gen_boot.join(&fallback_name);
+
+            let mut fallback_cmd = std::process::Command::new("mkinitcpio");
+            fallback_cmd.arg("-k").arg(&kernel_version);
+            fallback_cmd.arg("-g").arg(&fallback_path);
+            fallback_cmd.arg("-S");
+
+            if let Ok(output) = fallback_cmd.output() {
+                if output.status.success() && fallback_path.exists() {
+                    println!(
+                        "Generated fallback initramfs at {}",
+                        fallback_path.display()
+                    );
+                }
+            }
+
+            let _ = fs::remove_dir_all(&temp_dir);
         }
 
         Ok(())
@@ -541,6 +558,8 @@ impl Store {
                 }
             }
         }
+
+        BootApplier::remove_generation_boot_entry(id)?;
 
         self.generations.delete(id)
     }

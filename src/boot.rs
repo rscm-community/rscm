@@ -7,7 +7,7 @@ use crate::config::{BootConfig, InitrdConfig, KernelConfig, SystemdBootConfig};
 
 const SYSTEMD_BOOT_LOADER_CONF: &str = "/boot/loader/loader.conf";
 const SYSTEMD_BOOT_ENTRIES_DIR: &str = "/boot/loader/entries";
-const RSCM_ESP_SUBDIR: &str = "/boot/rscm";
+const RSCM_ESP_SUBDIR: &str = "rscm";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BootEntry {
@@ -26,6 +26,7 @@ impl BootApplier {
             if let Some(ref systemd_boot) = loader.systemd_boot {
                 if systemd_boot.enable.unwrap_or(true) {
                     if !Self::is_systemd_boot_installed() {
+                        println!("systemd-boot not installed, installing...");
                         Self::install_systemd_boot()?;
                     }
                     Self::apply_systemd_boot(boot_config, systemd_boot, generation_id, gen_path)?;
@@ -38,10 +39,18 @@ impl BootApplier {
 
     fn is_systemd_boot_installed() -> bool {
         let output = std::process::Command::new("bootctl")
+            .arg("--path=/boot")
             .arg("is-installed")
             .output();
         match output {
-            Ok(o) => o.status.success(),
+            Ok(o) => {
+                if o.status.success() {
+                    let stdout = String::from_utf8_lossy(&o.stdout);
+                    stdout.trim() == "yes"
+                } else {
+                    false
+                }
+            }
             Err(_) => false,
         }
     }
@@ -55,6 +64,7 @@ impl BootApplier {
         println!("Installing systemd-boot...");
 
         let output = std::process::Command::new("bootctl")
+            .arg("--path=/boot")
             .arg("install")
             .output()
             .map_err(|e| anyhow::anyhow!("Failed to run bootctl install: {}", e))?;
@@ -81,6 +91,7 @@ impl BootApplier {
 
         let entries_dir = Path::new(SYSTEMD_BOOT_ENTRIES_DIR);
         fs::create_dir_all(entries_dir)?;
+
         let rscm_esp_dir = Path::new(RSCM_ESP_SUBDIR);
         fs::create_dir_all(rscm_esp_dir)?;
 
@@ -117,7 +128,6 @@ impl BootApplier {
         let entry_path = entries_dir.join(&entry_filename);
         let entry_content = Self::format_entry(&entry);
         fs::write(&entry_path, entry_content)?;
-
         println!("Created boot entry: {}", entry_path.display());
 
         if let Some(limit) = systemd_boot.configuration_limit {
@@ -126,7 +136,11 @@ impl BootApplier {
 
         Self::set_default_entry(generation_id)?;
 
-        if let Err(e) = std::process::Command::new("bootctl").arg("update").status() {
+        if let Err(e) = std::process::Command::new("bootctl")
+            .arg("--path=/boot")
+            .arg("update")
+            .status()
+        {
             eprintln!("Warning: bootctl update failed: {}", e);
         }
 
@@ -152,37 +166,25 @@ impl BootApplier {
         };
         let esp_filename = format!("{}-gen-{}{}", stem, generation_id, ext);
 
-        let dest_dir = Path::new(esp_subdir);
-        fs::create_dir_all(dest_dir)?;
+        let dest_dir = Path::new("/boot").join(esp_subdir);
+        fs::create_dir_all(&dest_dir)?;
 
         let dest_path = dest_dir.join(&esp_filename);
         fs::copy(src_path, &dest_path)?;
 
-        Ok(format!("/rscm/{}", esp_filename))
+        let esp_path = format!("{}/{}", esp_subdir, esp_filename);
+        Ok(esp_path)
     }
 
-    fn write_loader_conf(_systemd_boot: &SystemdBootConfig) -> Result<()> {
+    fn write_loader_conf(systemd_boot: &SystemdBootConfig) -> Result<()> {
         let loader_path = Path::new(SYSTEMD_BOOT_LOADER_CONF);
 
-        let mut existing_timeout: Option<u32> = None;
-        if loader_path.exists() {
-            let content = fs::read_to_string(loader_path)?;
-            for line in content.lines() {
-                let line = line.trim();
-                if let Some(val) = line.strip_prefix("timeout ") {
-                    if let Ok(t) = val.trim().parse::<u32>() {
-                        existing_timeout = Some(t);
-                    }
-                }
-            }
-        }
+        let timeout = systemd_boot.timeout.unwrap_or(5);
 
         let mut conf = String::new();
         conf.push_str("# rscm managed - do not edit manually\n");
         conf.push_str("default rscm-*.conf\n");
-        if let Some(timeout) = existing_timeout {
-            conf.push_str(&format!("timeout {}\n", timeout));
-        }
+        conf.push_str(&format!("timeout {}\n", timeout));
         conf.push_str("editor no\n");
         conf.push_str("console-mode keep\n");
 
@@ -306,7 +308,7 @@ impl BootApplier {
                 for entry in entries.flatten() {
                     let name = entry.file_name();
                     let name_str = name.to_string_lossy();
-                    if (name_str.starts_with("initramfs-") || name_str.starts_with("initrd"))
+                    if (name_str.starts_with("initramfs") || name_str.starts_with("initrd"))
                         && !name_str.contains("fallback")
                     {
                         return Ok(Some(InitrdInfo {
@@ -322,7 +324,7 @@ impl BootApplier {
                 for entry in entries.flatten() {
                     let name = entry.file_name();
                     let name_str = name.to_string_lossy();
-                    if name_str.starts_with("initramfs-") || name_str.starts_with("initrd") {
+                    if name_str.starts_with("initramfs") || name_str.starts_with("initrd") {
                         return Ok(Some(InitrdInfo {
                             path: entry.path().to_string_lossy().to_string(),
                         }));
@@ -335,7 +337,7 @@ impl BootApplier {
             for entry in entries.flatten() {
                 let name = entry.file_name();
                 let name_str = name.to_string_lossy();
-                if name_str.starts_with("initramfs-")
+                if name_str.starts_with("initramfs")
                     && name_str.ends_with(".img")
                     && !name_str.contains("fallback")
                 {
@@ -362,6 +364,11 @@ impl BootApplier {
             if let Some(ref params) = kernel.params {
                 options.extend(params.clone());
             }
+        }
+
+        let root_device = Self::get_root_device();
+        if let Some(ref root) = root_device {
+            options.push(root.clone());
         }
 
         if let Some(ref initrd) = boot_config.initrd {
@@ -430,12 +437,29 @@ impl BootApplier {
             .map(|s| s.trim().to_string())
     }
 
+    fn get_root_device() -> Option<String> {
+        fs::read_to_string("/proc/cmdline")
+            .ok()
+            .and_then(|cmdline| {
+                cmdline
+                    .split_whitespace()
+                    .find(|p| p.starts_with("root="))
+                    .map(|s| s.to_string())
+            })
+    }
+
     fn set_default_entry(generation_id: u64) -> Result<()> {
         let entry_name = format!("rscm-generation-{}.conf", generation_id);
         let loader_path = Path::new(SYSTEMD_BOOT_LOADER_CONF);
 
-        let content = fs::read_to_string(loader_path)?;
-        let mut lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
+        let mut lines: Vec<String> = if loader_path.exists() {
+            fs::read_to_string(loader_path)?
+                .lines()
+                .map(|l| l.to_string())
+                .collect()
+        } else {
+            vec![]
+        };
 
         let mut found = false;
         for line in &mut lines {
@@ -567,6 +591,13 @@ impl BootApplier {
             }
         }
 
+        Ok(())
+    }
+
+    pub fn remove_generation_boot_entry(generation_id: u64) -> Result<()> {
+        if Self::is_systemd_boot_installed() {
+            Self::remove_entry(generation_id)?;
+        }
         Ok(())
     }
 }
