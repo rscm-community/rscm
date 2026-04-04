@@ -10,6 +10,8 @@ use anyhow::Result;
 use mlua::serde::LuaSerdeExt;
 use mlua::{Lua, Table, Value};
 use std::collections::HashMap;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 pub struct LuaEngine {
@@ -145,7 +147,23 @@ impl<'a> LuaEngine {
         Ok(())
     }
 
-    pub fn load_config(&self, content: &str) -> Result<Configuration> {
+    pub fn load_config(&self, content: &str, config_path: &Path) -> Result<Configuration> {
+        self.load_config_recursive(content, config_path, &mut HashSet::new())
+    }
+
+    fn load_config_recursive(
+        &self,
+        content: &str,
+        config_path: &Path,
+        visited: &mut HashSet<PathBuf>,
+    ) -> Result<Configuration> {
+        let canonical = config_path
+            .canonicalize()
+            .unwrap_or_else(|_| config_path.to_path_buf());
+        if !visited.insert(canonical.clone()) {
+            return Ok(Configuration::default());
+        }
+
         let fresh = self.lua.create_table()?;
         self.lua.globals().set("__config_root", fresh)?;
 
@@ -257,6 +275,29 @@ impl<'a> LuaEngine {
                 .unwrap_or_default();
         } else if let Ok(imports_array) = root.get::<Vec<String>>("imports") {
             config.imports = imports_array;
+        }
+
+        let config_dir = config_path.parent().unwrap_or_else(|| Path::new("."));
+
+        for import_path in &config.imports.clone() {
+            let import_path = import_path.trim();
+            let resolved = if import_path.starts_with('/') {
+                PathBuf::from(import_path)
+            } else {
+                config_dir.join(import_path)
+            };
+
+            if resolved.exists() {
+                let import_content = std::fs::read_to_string(&resolved).map_err(|e| {
+                    anyhow::anyhow!("Cannot read import file {}: {}", resolved.display(), e)
+                })?;
+
+                let imported_config =
+                    self.load_config_recursive(&import_content, &resolved, visited)?;
+                config.merge(imported_config);
+            } else {
+                eprintln!("Warning: import file not found: {}", resolved.display());
+            }
         }
 
         Ok(config)

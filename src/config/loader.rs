@@ -18,11 +18,11 @@ impl ConfigLoader {
         let path = path.as_ref();
         let content = fs::read_to_string(path)
             .with_context(|| format!("failed to read config file: {}", path.display()))?;
-        self.load_string(&content)
+        self.load_string(&content, path)
     }
 
-    pub fn load_string(&self, content: &str) -> Result<Configuration> {
-        self.engine.load_config(content)
+    pub fn load_string(&self, content: &str, config_path: &Path) -> Result<Configuration> {
+        self.engine.load_config(content, config_path)
     }
 
     pub fn validate(&self, config: &Configuration) -> Result<()> {

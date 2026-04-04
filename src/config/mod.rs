@@ -88,6 +88,231 @@ pub struct Configuration {
     pub imports: Vec<String>,
 }
 
+impl Configuration {
+    pub fn merge(&mut self, other: Configuration) {
+        if other.system.is_some() {
+            if let Some(ref mut self_sys) = self.system {
+                if let Some(other_sys) = other.system {
+                    if other_sys.hostname.is_some() {
+                        self_sys.hostname = other_sys.hostname;
+                    }
+                    if other_sys.timezone.is_some() {
+                        self_sys.timezone = other_sys.timezone;
+                    }
+                    if other_sys.locale.is_some() {
+                        self_sys.locale = other_sys.locale;
+                    }
+                    if other_sys.keymap.is_some() {
+                        self_sys.keymap = other_sys.keymap;
+                    }
+                    if other_sys.locales.is_some() {
+                        self_sys.locales = other_sys.locales;
+                    }
+                    if other_sys.locale_conf.is_some() {
+                        self_sys.locale_conf = other_sys.locale_conf;
+                    }
+                    if other_sys.limits.is_some() {
+                        self_sys.limits = other_sys.limits;
+                    }
+                    if other_sys.sysctl.is_some() {
+                        self_sys.sysctl = other_sys.sysctl;
+                    }
+                    if other_sys.cleanup.is_some() {
+                        self_sys.cleanup = other_sys.cleanup;
+                    }
+                }
+            } else {
+                self.system = other.system;
+            }
+        }
+
+        self.packages.list.extend(other.packages.list);
+        for (k, v) in other.packages.map {
+            self.packages.map.entry(k).or_insert(v);
+        }
+
+        for (k, v) in other.services {
+            self.services.entry(k).or_insert(v);
+        }
+
+        for (k, v) in other.users {
+            self.users.entry(k).or_insert(v);
+        }
+
+        if other.network.is_some() {
+            if let Some(ref mut self_net) = self.network {
+                if let Some(other_net) = other.network {
+                    if other_net.hostname.is_some() {
+                        self_net.hostname = other_net.hostname;
+                    }
+                    for (k, v) in other_net.interfaces {
+                        self_net.interfaces.entry(k).or_insert(v);
+                    }
+                    if other_net.firewall.is_some() {
+                        self_net.firewall = other_net.firewall;
+                    }
+                }
+            } else {
+                self.network = other.network;
+            }
+        }
+
+        for (k, v) in other.sources {
+            self.sources.entry(k).or_insert(v);
+        }
+
+        for (k, v) in other.systems {
+            self.systems.entry(k).or_insert(v);
+        }
+
+        if other.boot.is_some() {
+            if let Some(ref mut self_boot) = self.boot {
+                if let Some(other_boot) = other.boot {
+                    if other_boot.kernel.is_some() {
+                        self_boot.kernel = other_boot.kernel;
+                    }
+                    if other_boot.kernel_modules.is_some() {
+                        self_boot.kernel_modules = other_boot.kernel_modules;
+                    }
+                    if other_boot.initrd.is_some() {
+                        self_boot.initrd = other_boot.initrd;
+                    }
+                    if other_boot.loader.is_some() {
+                        self_boot.loader = other_boot.loader;
+                    }
+                    if other_boot.console_log_level.is_some() {
+                        self_boot.console_log_level = other_boot.console_log_level;
+                    }
+                    if other_boot.dev_shm_size.is_some() {
+                        self_boot.dev_shm_size = other_boot.dev_shm_size;
+                    }
+                    if other_boot.grow_partition.is_some() {
+                        self_boot.grow_partition = other_boot.grow_partition;
+                    }
+                }
+            } else {
+                self.boot = other.boot;
+            }
+        }
+
+        for (k, v) in other.programs {
+            self.programs.entry(k).or_insert(v);
+        }
+
+        if other.hardware.graphics.is_some() {
+            if self.hardware.graphics.is_none() {
+                self.hardware.graphics = other.hardware.graphics;
+            }
+        }
+        if other.hardware.bluetooth.is_some() {
+            if self.hardware.bluetooth.is_none() {
+                self.hardware.bluetooth = other.hardware.bluetooth;
+            }
+        }
+        if other.hardware.pulseaudio.is_some() {
+            if self.hardware.pulseaudio.is_none() {
+                self.hardware.pulseaudio = other.hardware.pulseaudio;
+            }
+        }
+        if other.hardware.firmware.is_some() {
+            if self.hardware.firmware.is_none() {
+                self.hardware.firmware = other.hardware.firmware;
+            }
+        }
+        if other.hardware.opengl.is_some() {
+            if self.hardware.opengl.is_none() {
+                self.hardware.opengl = other.hardware.opengl;
+            }
+        }
+
+        if other.security.sudo.is_some() {
+            if self.security.sudo.is_none() {
+                self.security.sudo = other.security.sudo;
+            }
+        }
+        if other.security.pam.is_some() {
+            if self.security.pam.is_none() {
+                self.security.pam = other.security.pam;
+            }
+        }
+        if other.security.polkit.is_some() {
+            if self.security.polkit.is_none() {
+                self.security.polkit = other.security.polkit;
+            }
+        }
+
+        for (k, v) in other.filesystems {
+            self.filesystems.entry(k).or_insert(v);
+        }
+
+        self.swapdevices.extend(other.swapdevices);
+
+        if other.environment.variables.is_some() {
+            if let Some(ref mut self_vars) = self.environment.variables {
+                if let Some(other_vars) = other.environment.variables {
+                    for (k, v) in other_vars {
+                        self_vars.entry(k).or_insert(v);
+                    }
+                }
+            } else {
+                self.environment.variables = other.environment.variables;
+            }
+        }
+        if other.environment.session_variables.is_some() {
+            if let Some(ref mut self_vars) = self.environment.session_variables {
+                if let Some(other_vars) = other.environment.session_variables {
+                    for (k, v) in other_vars {
+                        self_vars.entry(k).or_insert(v);
+                    }
+                }
+            } else {
+                self.environment.session_variables = other.environment.session_variables;
+            }
+        }
+        if other.environment.shell_init.is_some() && self.environment.shell_init.is_none() {
+            self.environment.shell_init = other.environment.shell_init;
+        }
+        if other.environment.login_shell_init.is_some()
+            && self.environment.login_shell_init.is_none()
+        {
+            self.environment.login_shell_init = other.environment.login_shell_init;
+        }
+        if other.environment.paths_to_link.is_some() {
+            if let Some(ref mut self_paths) = self.environment.paths_to_link {
+                if let Some(other_paths) = other.environment.paths_to_link {
+                    self_paths.extend(other_paths);
+                }
+            } else {
+                self.environment.paths_to_link = other.environment.paths_to_link;
+            }
+        }
+
+        for (k, v) in other.plugins {
+            self.plugins.entry(k).or_insert(v);
+        }
+
+        if other.outputs.is_some() {
+            if self.outputs.is_none() {
+                self.outputs = other.outputs;
+            }
+        }
+
+        if other.overlays.is_some() {
+            if let Some(ref mut self_ol) = self.overlays {
+                if let Some(other_ol) = other.overlays {
+                    for (k, v) in other_ol {
+                        self_ol.entry(k).or_insert(v);
+                    }
+                }
+            } else {
+                self.overlays = other.overlays;
+            }
+        }
+
+        self.imports.extend(other.imports);
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SystemConfig {
     pub hostname: Option<String>,
