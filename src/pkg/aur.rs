@@ -512,6 +512,13 @@ impl AurHelper {
                 fs::remove_dir_all(&clone_dir)?;
             }
             fs::create_dir_all(&self.build_dir)?;
+            println!("Updating cached AUR repo for {}...", name);
+            let _ = Command::new("git")
+                .args(["pull", "--ff-only"])
+                .current_dir(&cache_clone_dir)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
             println!("Using cached AUR repo for {}", name);
             fs::create_dir_all(&cache_clone_dir)?;
             copy_dir_recursive(&cache_clone_dir, &clone_dir)?;
