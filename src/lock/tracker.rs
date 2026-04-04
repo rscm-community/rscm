@@ -181,6 +181,7 @@ impl LockTracker {
         config_content: &str,
         store_root: PathBuf,
         incremental: bool,
+        mirrors: Option<Vec<String>>,
     ) -> Result<LockFile> {
         let current = if incremental && self.exists() {
             self.load()?
@@ -188,7 +189,7 @@ impl LockTracker {
             None
         };
 
-        let mut resolver = Resolver::new(store_root);
+        let mut resolver = Resolver::new(store_root, mirrors);
         let resolved = resolver.resolve_config(config)?;
         self.update(current.as_ref(), resolved, config_content)
     }

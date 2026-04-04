@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 const ARCHIVE_URL: &str = "https://archive.archlinux.org";
-const MIRROR_URL: &str = "https://geo.mirror.pkgbuild.com";
+pub const DEFAULT_MIRROR_URL: &str = "https://geo.mirror.pkgbuild.com";
 const REPOS: &[&str] = &["core", "extra", "multilib"];
 const ARCH: &str = "x86_64";
 
@@ -29,6 +29,7 @@ pub struct Pacman {
     store_root: PathBuf,
     package_store: PackageStore,
     content_store: ContentStore,
+    mirrors: Vec<String>,
 }
 
 impl Pacman {
@@ -51,6 +52,7 @@ impl Pacman {
             store_root,
             package_store,
             content_store,
+            mirrors: vec![DEFAULT_MIRROR_URL.to_string()],
         }
     }
 
@@ -71,7 +73,15 @@ impl Pacman {
             store_root,
             package_store,
             content_store,
+            mirrors: vec![DEFAULT_MIRROR_URL.to_string()],
         }
+    }
+
+    pub fn with_mirrors(mut self, mirrors: Vec<String>) -> Self {
+        if !mirrors.is_empty() {
+            self.mirrors = mirrors;
+        }
+        self
     }
 
     pub fn package_store(&self) -> &PackageStore {
@@ -96,27 +106,50 @@ impl Pacman {
             }
         }
 
-        let url = format!("{}/{}/os/{}/{}", MIRROR_URL, repo, ARCH, db_filename);
         let client = reqwest::blocking::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()?;
 
-        let response = client.get(&url).send()?;
-        if !response.status().is_success() {
-            return Err(anyhow::anyhow!(
-                "Failed to download repository database for {}: {}",
-                repo,
-                response.status()
-            ));
+        let mut last_error = None;
+        for mirror in &self.mirrors {
+            let url = format!("{}/{}/os/{}/{}", mirror, repo, ARCH, db_filename);
+
+            let response = match client.get(&url).send() {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("Warning: mirror {} failed: {}", mirror, e);
+                    last_error = Some(anyhow::anyhow!("Failed to download from {}: {}", mirror, e));
+                    continue;
+                }
+            };
+
+            if !response.status().is_success() {
+                eprintln!(
+                    "Warning: mirror {} returned status {}",
+                    mirror,
+                    response.status()
+                );
+                last_error = Some(anyhow::anyhow!(
+                    "Failed to download repository database for {} from {}: {}",
+                    repo,
+                    mirror,
+                    response.status()
+                ));
+                continue;
+            }
+
+            let temp_path = db_path.with_extension("tmp");
+            let mut file = File::create(&temp_path)?;
+            let content = response.bytes()?;
+            file.write_all(&content)?;
+
+            fs::rename(&temp_path, &db_path)?;
+            return Ok(db_path);
         }
 
-        let temp_path = db_path.with_extension("tmp");
-        let mut file = File::create(&temp_path)?;
-        let content = response.bytes()?;
-        file.write_all(&content)?;
-
-        fs::rename(&temp_path, &db_path)?;
-        Ok(db_path)
+        Err(last_error.unwrap_or_else(|| {
+            anyhow::anyhow!("No mirrors available for downloading {} database", repo)
+        }))
     }
 
     fn parse_repo_db(&self, db_path: &Path, package_name: &str) -> Result<Option<PackageInfo>> {
