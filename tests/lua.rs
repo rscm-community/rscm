@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use anyhow::Result;
 use rscm::lua::LuaEngine;
 
@@ -18,7 +20,7 @@ systems {
     }),
 }
 "#;
-    let config = engine.load_config(content)?;
+    let config = engine.load_config(content, Path::new("test.lua"))?;
     assert_eq!(config.systems.len(), 2);
 
     let derived = config
@@ -46,7 +48,7 @@ local cfg = {
 }
 system(cfg)
 "#;
-    let config = engine.load_config(content)?;
+    let config = engine.load_config(content, Path::new("test.lua"))?;
     let system = config.system.expect("system config not found");
     assert_eq!(system.hostname, Some("test-host".to_string()));
     assert_eq!(system.timezone, Some("UTC".to_string()));
@@ -60,7 +62,7 @@ fn test_packages_parsing() -> Result<()> {
 local cfg = { "vim", "git", "curl" }
 packages(cfg)
 "#;
-    let config = engine.load_config(content)?;
+    let config = engine.load_config(content, Path::new("test.lua"))?;
     assert_eq!(config.packages.list.len(), 3);
     assert!(config.packages.list.contains(&"vim".to_string()));
     Ok(())
