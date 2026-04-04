@@ -860,7 +860,6 @@ impl<'a> LuaEngine {
     fn parse_systemd_boot(&self, section: Table) -> Result<crate::config::SystemdBootConfig> {
         let mut config = crate::config::SystemdBootConfig::default();
         config.enable = section.get::<bool>("enable").ok();
-        config.install = section.get::<bool>("install").ok();
         config.configuration_limit = section
             .get::<f64>("configurationLimit")
             .map(|v| v as u32)
