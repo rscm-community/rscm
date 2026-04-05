@@ -236,9 +236,9 @@ pub fn init_store(force: bool) -> Result<PathBuf> {
 
             println!("✓ Set permissions to 775 (owner:group can read/write)");
         }
-
-        create_store_subdirs(&system_store)?;
     }
+
+    create_store_subdirs(&system_store)?;
 
     println!("\nNote: To allow regular users to write to /rscm:");
     println!("  sudo groupadd -f rscm");
@@ -261,6 +261,7 @@ fn create_store_subdirs(store_root: &Path) -> Result<()> {
         "locks/history",
         "locks/tags",
         "log",
+        "scripts",
     ];
 
     for subdir in &subdirs {
@@ -304,18 +305,7 @@ fn init_config_dir() -> Result<()> {
         println!("✓ Configuration file {} already exists", SYSTEM_CONFIG_PATH);
     } else {
         println!("Creating {}...", SYSTEM_CONFIG_PATH);
-        let default_config = r#"-- rscm configuration file
-
-sources {
-    -- Define external sources here
-    -- Example:
-    -- dotfiles = github {
-    --     owner = "your-username",
-    --     repo = "dotfiles",
-    --     ref = "main",
-    -- },
-}
-
+         let default_config = r#"-- rscm configuration file
 system {
     hostname = "my-host",
     timezone = "Asia/Shanghai",
@@ -348,15 +338,7 @@ services {
 users {
     -- Define user accounts
     -- alice = {
-    --     uid = 1000,
-    --     groups = { "wheel" },
-    --     shell = "/bin/zsh",
-    -- },
-}
-
-network {
-    -- interfaces = {
-    --     eth0 = { dhcp = true },
+    --     password = "password",
     -- },
 }
 
@@ -369,62 +351,10 @@ boot {
     --     },
     -- },
     -- loader = {
-    --     type = "systemd-boot",
     --     systemdBoot = {
     --         enable = true,
     --     },
     },
-}
-
-hardware {
-    -- graphics = {
-    --     enable = true,
-    --     driver = "auto",
-    -- },
-}
-
-security {
-    -- sudo = {
-    --     enable = true,
-    --     wheelNeedsPassword = true,
-    -- },
-}
-
-filesystems {
-    -- Define filesystem mount points
-    -- ["/"] = {
-    --     device = "/dev/sda1",
-    --     fsType = "ext4",
-    --     options = { "defaults", "noatime" },
-    -- },
-}
-
-swapdevices {
-    -- Define swap devices
-    -- {
-    --     device = "/dev/sda2",
-    --     size = 8192,
-    -- },
-}
-
-environment {
-    -- sessionVariables = {
-    --     LANG = "zh_CN.UTF-8",
-    -- },
-    -- variables = {
-    --     EDITOR = "vim",
-    -- },
-}
-
-programs {
-    -- Enable and configure programs
-    -- git = {
-    --     enable = true,
-    --     config = {
-    --         ["user.name"] = "Your Name",
-    --         ["user.email"] = "your@email.com",
-    --     },
-    -- },
 }
 "#;
         std::fs::write(&config_file, default_config).map_err(|e| {
