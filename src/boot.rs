@@ -30,6 +30,7 @@ impl BootApplier {
                         Self::install_systemd_boot()?;
                     }
                     Self::apply_systemd_boot(boot_config, systemd_boot, generation_id, gen_path)?;
+                    Self::install_switch_service()?;
                     return Ok(());
                 }
             }
@@ -75,6 +76,70 @@ impl BootApplier {
         }
 
         println!("systemd-boot installed successfully");
+        Ok(())
+    }
+
+    fn install_switch_service() -> Result<()> {
+        let service_content = r#"[Unit]
+Description=Switch to rscm generation specified in boot parameters
+DefaultDependencies=no
+After=sysinit.target
+Before=basic.target
+
+[Service]
+Type=oneshot
+ExecStart=/rscm/scripts/rscm-auto-switch
+RemainAfterExit=yes
+
+[Install]
+WantedBy=sysinit.target
+"#;
+        let service_path = Path::new("/etc/systemd/system/rscm-switch.service");
+        fs::write(service_path, service_content)?;
+        println!("Installed rscm-switch.service");
+
+        let script_content = r#"#!/bin/sh
+# Auto-switch to the generation specified in kernel boot parameters
+GENERATION=$(cat /proc/cmdline | tr ' ' '\n' | grep '^rscm.generation=' | cut -d'=' -f2)
+if [ -n "$GENERATION" ]; then
+    CURRENT=$(readlink -f /rscm/current-system 2>/dev/null | xargs basename 2>/dev/null)
+    if [ "$CURRENT" != "$GENERATION" ]; then
+        /usr/bin/rscm switch "$GENERATION"
+    fi
+fi
+"#;
+        let scripts_dir = Path::new("/rscm/scripts");
+        fs::create_dir_all(scripts_dir)?;
+        let script_path = scripts_dir.join("rscm-auto-switch");
+        fs::write(&script_path, script_content)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::Permissions::from_mode(0o755);
+            fs::set_permissions(&script_path, perms)?;
+        }
+        println!(
+            "Installed rscm-auto-switch script to {}",
+            script_path.display()
+        );
+
+        if std::process::Command::new("systemctl")
+            .arg("daemon-reload")
+            .status()
+            .is_err()
+        {
+            eprintln!("Warning: systemctl daemon-reload failed");
+        }
+
+        if std::process::Command::new("systemctl")
+            .arg("enable")
+            .arg("rscm-switch.service")
+            .status()
+            .is_err()
+        {
+            eprintln!("Warning: failed to enable rscm-switch.service");
+        }
+
         Ok(())
     }
 
@@ -400,6 +465,8 @@ impl BootApplier {
         }
 
         let title = format!("rscm generation {} ({})", generation_id, kernel_version);
+
+        options.push(format!("rscm.generation={}", generation_id));
 
         Ok(BootEntry {
             title,
