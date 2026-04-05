@@ -1,7 +1,11 @@
 [package]
 name = "rscm"
+description = "Reproduceable System Configuration Manager"
+authors = ["xiaoli-white"]
 version = "0.1.0"
 edition = "2024"
+repository = "https://github.com/rscm-community/rscm"
+license = "MIT"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
