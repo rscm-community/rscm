@@ -14,7 +14,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::boot::BootApplier;
-use crate::config::Configuration;
+use crate::config::{CleanupConfig, Configuration};
 use crate::lock::LockFile;
 use crate::pkg::{BuildType, PackageConfig, PackageManagerFactory};
 use crate::service::ServiceApplier;
@@ -124,6 +124,10 @@ impl Store {
         }
 
         let boot_config = configuration.boot.clone();
+        let cleanup_config = configuration
+            .system
+            .as_ref()
+            .and_then(|s| s.cleanup.clone());
         let id = self.generations.create(
             &package_names,
             &files,
@@ -141,6 +145,12 @@ impl Store {
                 Self::generate_initramfs(&gen_path, &kernel_packages, boot_config.as_ref())
             {
                 eprintln!("Warning: initramfs generation failed: {}", e);
+            }
+        }
+
+        if let Some(ref cleanup) = cleanup_config {
+            if let Err(e) = Self::apply_cleanup(&self.generations, cleanup, id) {
+                eprintln!("Warning: cleanup failed: {}", e);
             }
         }
 
@@ -632,5 +642,100 @@ impl Store {
         }
 
         Ok(result)
+    }
+
+    fn apply_cleanup(
+        generations: &GenerationStore,
+        cleanup: &CleanupConfig,
+        current_id: u64,
+    ) -> Result<()> {
+        if let Some(ref gen_cleanup) = cleanup.generations {
+            let generations_dir = generations.root();
+
+            if !generations_dir.exists() {
+                return Ok(());
+            }
+
+            let mut generation_ids: Vec<u64> = Vec::new();
+            for entry in fs::read_dir(generations_dir)? {
+                let entry = entry?;
+                if entry.path().is_dir() {
+                    if let Some(name) = entry.file_name().to_str() {
+                        if let Ok(id) = name.parse::<u64>() {
+                            generation_ids.push(id);
+                        }
+                    }
+                }
+            }
+            generation_ids.sort();
+
+            let mut ids_to_delete: Vec<u64> = Vec::new();
+
+            if let Some(keep) = gen_cleanup.keep {
+                let keep_count = keep as usize;
+                if generation_ids.len() > keep_count {
+                    let keep_ids: Vec<u64> = generation_ids
+                        .iter()
+                        .rev()
+                        .take(keep_count)
+                        .cloned()
+                        .collect();
+                    for id in &generation_ids {
+                        if !keep_ids.contains(id) && *id != current_id {
+                            ids_to_delete.push(*id);
+                        }
+                    }
+                }
+            }
+
+            if let Some(max_age_days) = gen_cleanup.max_age_days {
+                let now = std::time::SystemTime::now();
+                let max_age = std::time::Duration::from_secs(max_age_days * 86400);
+                for id in &generation_ids {
+                    if *id != current_id {
+                        let gen_path = generations_dir.join(id.to_string());
+                        if let Ok(metadata) = fs::metadata(&gen_path) {
+                            if let Ok(modified) = metadata.modified() {
+                                if let Ok(age) = now.duration_since(modified) {
+                                    if age > max_age && !ids_to_delete.contains(id) {
+                                        ids_to_delete.push(*id);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if let Some(keep_oldest) = gen_cleanup.keep_oldest {
+                let keep_count = keep_oldest as usize;
+                if generation_ids.len() > keep_count {
+                    let keep_ids: Vec<u64> =
+                        generation_ids.iter().take(keep_count).cloned().collect();
+                    for id in &generation_ids {
+                        if !keep_ids.contains(id) && *id != current_id {
+                            if !ids_to_delete.contains(id) {
+                                ids_to_delete.push(*id);
+                            }
+                        }
+                    }
+                }
+            }
+
+            for id in &ids_to_delete {
+                println!("Cleaning up old generation: {}", id);
+                if let Ok(g) = generations.get(*id) {
+                    if g.is_some() {
+                        let _ = generations.delete(*id);
+                    }
+                }
+                BootApplier::remove_generation_boot_entry(*id)?;
+            }
+
+            if !ids_to_delete.is_empty() {
+                println!("Cleaned up {} old generation(s)", ids_to_delete.len());
+            }
+        }
+        Ok(())
     }
 }

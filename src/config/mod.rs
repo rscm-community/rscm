@@ -118,7 +118,15 @@ impl Configuration {
                         self_sys.sysctl = other_sys.sysctl;
                     }
                     if other_sys.cleanup.is_some() {
-                        self_sys.cleanup = other_sys.cleanup;
+                        if let Some(ref mut self_cleanup) = self_sys.cleanup {
+                            if let Some(ref other_cleanup) = other_sys.cleanup {
+                                if let Some(ref other_gen) = other_cleanup.generations {
+                                    self_cleanup.generations = Some(other_gen.clone());
+                                }
+                            }
+                        } else {
+                            self_sys.cleanup = other_sys.cleanup;
+                        }
                     }
                 }
             } else {
@@ -323,8 +331,20 @@ pub struct SystemConfig {
     pub locale_conf: Option<HashMap<String, String>>,
     pub limits: Option<HashMap<String, String>>,
     pub sysctl: Option<HashMap<String, String>>,
-    pub cleanup: Option<HashMap<String, String>>,
+    pub cleanup: Option<CleanupConfig>,
     pub pacman_mirrors: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CleanupConfig {
+    pub generations: Option<CleanupGenerationsConfig>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CleanupGenerationsConfig {
+    pub keep: Option<u64>,
+    pub max_age_days: Option<u64>,
+    pub keep_oldest: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

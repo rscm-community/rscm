@@ -36,6 +36,10 @@ impl GenerationStore {
         Ok(Self { root })
     }
 
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
     pub fn create<F>(
         &self,
         package_names: &[String],
