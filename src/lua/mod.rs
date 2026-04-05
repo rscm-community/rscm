@@ -455,9 +455,25 @@ impl<'a> LuaEngine {
         config.sysctl = section
             .get::<std::collections::HashMap<String, String>>("sysctl")
             .ok();
-        config.cleanup = section
-            .get::<std::collections::HashMap<String, String>>("cleanup")
-            .ok();
+        config.cleanup = if let Ok(cleanup_table) = section.get::<Table>("cleanup") {
+            let mut cleanup = crate::config::CleanupConfig::default();
+            if let Ok(gen_table) = cleanup_table.get::<Table>("generations") {
+                let mut gen_cleanup = crate::config::CleanupGenerationsConfig::default();
+                if let Ok(keep) = gen_table.get::<i64>("keep") {
+                    gen_cleanup.keep = Some(keep as u64);
+                }
+                if let Ok(max_age) = gen_table.get::<i64>("max_age_days") {
+                    gen_cleanup.max_age_days = Some(max_age as u64);
+                }
+                if let Ok(keep_oldest) = gen_table.get::<i64>("keep_oldest") {
+                    gen_cleanup.keep_oldest = Some(keep_oldest as u64);
+                }
+                cleanup.generations = Some(gen_cleanup);
+            }
+            Some(cleanup)
+        } else {
+            None
+        };
         config.pacman_mirrors = section.get::<Vec<String>>("pacman_mirrors").ok();
         Ok(config)
     }
