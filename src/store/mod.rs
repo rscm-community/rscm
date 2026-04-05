@@ -152,8 +152,8 @@ impl Store {
         kernel_packages: &[String],
         boot_config: Option<&crate::config::BootConfig>,
     ) -> Result<()> {
-        let gen_modules_dir = gen_path.join("usr/lib/modules");
-        let system_modules_dir = Path::new("/usr/lib/modules");
+        let gen_modules_dir = gen_path.join("lib/modules");
+        let system_modules_dir = Path::new("/lib/modules");
 
         let mut all_kernel_versions: Vec<String> = Vec::new();
 
@@ -198,7 +198,7 @@ impl Store {
             fs::create_dir_all(&gen_boot)?;
 
             let temp_dir = gen_path.join("tmp_initramfs_modules");
-            let temp_modules_dir = temp_dir.join("usr/lib/modules").join(kernel_version);
+            let temp_modules_dir = temp_dir.join("lib/modules").join(kernel_version);
             fs::create_dir_all(&temp_modules_dir)?;
 
             let gen_kernel_modules_dir = gen_modules_dir.join(kernel_version);
