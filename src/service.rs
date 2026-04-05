@@ -7,7 +7,7 @@ use std::process::Command;
 
 use crate::config::ServiceConfig;
 
-const MANAGED_SERVICES_PATH: &str = "/etc/rscm/managed_services.toml";
+const MANAGED_SERVICES_FILE: &str = "managed_services.toml";
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DeclaredServices {
@@ -19,9 +19,9 @@ pub struct ServiceTracker {
 }
 
 impl ServiceTracker {
-    pub fn new() -> Self {
+    pub fn new(store_root: &Path) -> Self {
         Self {
-            path: PathBuf::from(MANAGED_SERVICES_PATH),
+            path: store_root.join(MANAGED_SERVICES_FILE),
         }
     }
 
@@ -69,8 +69,8 @@ impl ServiceTracker {
 pub struct ServiceApplier;
 
 impl ServiceApplier {
-    pub fn apply(services: &HashMap<String, ServiceConfig>) -> Result<()> {
-        let tracker = ServiceTracker::new();
+    pub fn apply(services: &HashMap<String, ServiceConfig>, store_root: &Path) -> Result<()> {
+        let tracker = ServiceTracker::new(store_root);
         let removed = tracker.compute_removed(services);
 
         let mut needs_daemon_reload = false;

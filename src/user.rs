@@ -2,7 +2,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 use which::which;
 
@@ -12,8 +12,8 @@ use crate::pkg::{BuildType, PackageConfig, PackageManager};
 
 pub struct UserApplier;
 
-const MANAGED_USERS_PATH: &str = "/etc/rscm/managed_users.toml";
-const MANAGED_GROUPS_PATH: &str = "/etc/rscm/managed_groups.toml";
+const MANAGED_USERS_FILE: &str = "managed_users.toml";
+const MANAGED_GROUPS_FILE: &str = "managed_groups.toml";
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ManagedUsers {
@@ -54,27 +54,27 @@ fn ensure_openssl() -> Result<()> {
 }
 
 impl UserApplier {
-    pub fn apply(users: &HashMap<String, UserConfig>, _store_root: &Path) -> Result<()> {
-        let managed_users = Self::load_managed_users();
-        let managed_groups = Self::load_managed_groups();
+    pub fn apply(users: &HashMap<String, UserConfig>, store_root: &Path) -> Result<()> {
+        let managed_users = Self::load_managed_users(store_root);
+        let managed_groups = Self::load_managed_groups(store_root);
 
-        Self::remove_undeclared_users(users, &managed_users)?;
-        Self::remove_undeclared_groups(users, &managed_groups)?;
+        Self::remove_undeclared_users(users, &managed_users, store_root)?;
+        Self::remove_undeclared_groups(users, &managed_groups, store_root)?;
 
         for (username, config) in users {
             Self::apply_user(username, config)?;
-            Self::mark_user_managed(username)?;
+            Self::mark_user_managed(store_root, username)?;
 
             for group in &config.groups {
-                Self::mark_group_managed(group)?;
+                Self::mark_group_managed(store_root, group)?;
             }
         }
 
         Ok(())
     }
 
-    fn load_managed_groups() -> HashSet<String> {
-        let managed_file = PathBuf::from(MANAGED_GROUPS_PATH);
+    fn load_managed_groups(store_root: &Path) -> HashSet<String> {
+        let managed_file = store_root.join(MANAGED_GROUPS_FILE);
         if managed_file.exists() {
             if let Ok(content) = fs::read_to_string(&managed_file) {
                 if let Ok(data) = toml::from_str::<ManagedGroups>(&content) {
@@ -85,8 +85,8 @@ impl UserApplier {
         HashSet::new()
     }
 
-    fn save_managed_groups(groups: &HashSet<String>) -> Result<()> {
-        let managed_file = PathBuf::from(MANAGED_GROUPS_PATH);
+    fn save_managed_groups(store_root: &Path, groups: &HashSet<String>) -> Result<()> {
+        let managed_file = store_root.join(MANAGED_GROUPS_FILE);
         if let Some(parent) = managed_file.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -97,13 +97,13 @@ impl UserApplier {
         Ok(())
     }
 
-    fn mark_group_managed(group: &str) -> Result<()> {
+    fn mark_group_managed(store_root: &Path, group: &str) -> Result<()> {
         if group == "root" {
             return Ok(());
         }
-        let mut managed = Self::load_managed_groups();
+        let mut managed = Self::load_managed_groups(store_root);
         managed.insert(group.to_string());
-        Self::save_managed_groups(&managed)?;
+        Self::save_managed_groups(store_root, &managed)?;
         Ok(())
     }
 
@@ -111,8 +111,8 @@ impl UserApplier {
         managed_groups.contains(group)
     }
 
-    fn load_managed_users() -> HashSet<String> {
-        let managed_file = PathBuf::from(MANAGED_USERS_PATH);
+    fn load_managed_users(store_root: &Path) -> HashSet<String> {
+        let managed_file = store_root.join(MANAGED_USERS_FILE);
         if managed_file.exists() {
             if let Ok(content) = fs::read_to_string(&managed_file) {
                 if let Ok(data) = toml::from_str::<ManagedUsers>(&content) {
@@ -123,8 +123,8 @@ impl UserApplier {
         HashSet::new()
     }
 
-    fn save_managed_users(users: &HashSet<String>) -> Result<()> {
-        let managed_file = PathBuf::from(MANAGED_USERS_PATH);
+    fn save_managed_users(store_root: &Path, users: &HashSet<String>) -> Result<()> {
+        let managed_file = store_root.join(MANAGED_USERS_FILE);
         if let Some(parent) = managed_file.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -135,13 +135,13 @@ impl UserApplier {
         Ok(())
     }
 
-    fn mark_user_managed(username: &str) -> Result<()> {
+    fn mark_user_managed(store_root: &Path, username: &str) -> Result<()> {
         if username == "root" {
             return Ok(());
         }
-        let mut managed = Self::load_managed_users();
+        let mut managed = Self::load_managed_users(store_root);
         managed.insert(username.to_string());
-        Self::save_managed_users(&managed)?;
+        Self::save_managed_users(store_root, &managed)?;
         Ok(())
     }
 
@@ -164,6 +164,7 @@ impl UserApplier {
     fn remove_undeclared_users(
         config_users: &HashMap<String, UserConfig>,
         managed_users: &HashSet<String>,
+        store_root: &Path,
     ) -> Result<()> {
         let system_users = Self::get_system_users()?;
         let config_usernames: HashSet<&String> = config_users.keys().collect();
@@ -182,7 +183,7 @@ impl UserApplier {
                 } else {
                     let mut managed = managed_users.clone();
                     managed.remove(&username);
-                    Self::save_managed_users(&managed)?;
+                    Self::save_managed_users(store_root, &managed)?;
                 }
             }
         }
@@ -205,6 +206,7 @@ impl UserApplier {
     fn remove_undeclared_groups(
         config_users: &HashMap<String, UserConfig>,
         managed_groups: &HashSet<String>,
+        store_root: &Path,
     ) -> Result<()> {
         let mut declared_groups: HashSet<String> = HashSet::new();
         for config in config_users.values() {
@@ -250,7 +252,7 @@ impl UserApplier {
                 } else {
                     let mut managed = managed_groups.clone();
                     managed.remove(&group);
-                    Self::save_managed_groups(&managed)?;
+                    Self::save_managed_groups(store_root, &managed)?;
                 }
             }
         }
