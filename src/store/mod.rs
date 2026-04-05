@@ -443,7 +443,7 @@ impl Store {
             let services_content = fs::read_to_string(&services_config_path)?;
             let services: std::collections::HashMap<String, crate::config::ServiceConfig> =
                 toml::from_str(&services_content)?;
-            ServiceApplier::apply(&services)?;
+            ServiceApplier::apply(&services, &self.root)?;
         }
 
         let users_config_path = gen_path.join("users.toml");
@@ -451,11 +451,7 @@ impl Store {
             let users_content = fs::read_to_string(&users_config_path)?;
             let users: std::collections::HashMap<String, crate::config::UserConfig> =
                 toml::from_str(&users_content)?;
-            let store_root = gen_path
-                .parent()
-                .map(|p| p.to_path_buf())
-                .unwrap_or_else(|| gen_path.to_path_buf());
-            UserApplier::apply(&users, &store_root)?;
+            UserApplier::apply(&users, &self.root)?;
         }
 
         let boot_config_path = gen_path.join("boot_config.toml");
