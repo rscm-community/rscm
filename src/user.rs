@@ -1,7 +1,7 @@
-use anyhow::{Context, Result};
-use std::collections::HashMap;
+use anyhow::Result;
+use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use which::which;
 
@@ -10,6 +10,9 @@ use crate::pkg::pacman::Pacman;
 use crate::pkg::{BuildType, PackageConfig, PackageManager};
 
 pub struct UserApplier;
+
+const MANAGED_USERS_FILE: &str = "managed_users.json";
+const MANAGED_GROUPS_FILE: &str = "managed_groups.json";
 
 fn ensure_openssl() -> Result<()> {
     if which("openssl").is_ok() {
@@ -40,10 +43,199 @@ fn ensure_openssl() -> Result<()> {
 }
 
 impl UserApplier {
-    pub fn apply(users: &HashMap<String, UserConfig>) -> Result<()> {
+    pub fn apply(users: &HashMap<String, UserConfig>, store_root: &Path) -> Result<()> {
+        let managed_users = Self::load_managed_users(store_root);
+        let managed_groups = Self::load_managed_groups(store_root);
+
+        Self::remove_undeclared_users(users, &managed_users, store_root)?;
+        Self::remove_undeclared_groups(users, &managed_groups, store_root)?;
+
         for (username, config) in users {
             Self::apply_user(username, config)?;
+            Self::mark_user_managed(store_root, username)?;
+
+            for group in &config.groups {
+                Self::mark_group_managed(store_root, group)?;
+            }
         }
+
+        Ok(())
+    }
+
+    fn load_managed_groups(store_root: &Path) -> HashSet<String> {
+        let managed_file = store_root.parent().unwrap_or(store_root).join(MANAGED_GROUPS_FILE);
+        if managed_file.exists() {
+            if let Ok(content) = fs::read_to_string(&managed_file) {
+                if let Ok(groups) = serde_json::from_str::<Vec<String>>(&content) {
+                    return groups.into_iter().collect();
+                }
+            }
+        }
+        HashSet::new()
+    }
+
+    fn save_managed_groups(store_root: &Path, groups: &HashSet<String>) -> Result<()> {
+        let managed_file = store_root.parent().unwrap_or(store_root).join(MANAGED_GROUPS_FILE);
+        let content = serde_json::to_string(&groups.iter().cloned().collect::<Vec<_>>())?;
+        fs::write(managed_file, content)?;
+        Ok(())
+    }
+
+    fn mark_group_managed(store_root: &Path, group: &str) -> Result<()> {
+        if group == "root" {
+            return Ok(());
+        }
+        let mut managed = Self::load_managed_groups(store_root);
+        managed.insert(group.to_string());
+        Self::save_managed_groups(store_root, &managed)?;
+        Ok(())
+    }
+
+    fn is_managed_group(group: &str, managed_groups: &HashSet<String>) -> bool {
+        managed_groups.contains(group)
+    }
+
+    fn load_managed_users(store_root: &Path) -> HashSet<String> {
+        let managed_file = store_root.parent().unwrap_or(store_root).join(MANAGED_USERS_FILE);
+        if managed_file.exists() {
+            if let Ok(content) = fs::read_to_string(&managed_file) {
+                if let Ok(users) = serde_json::from_str::<Vec<String>>(&content) {
+                    return users.into_iter().collect();
+                }
+            }
+        }
+        HashSet::new()
+    }
+
+    fn save_managed_users(store_root: &Path, users: &HashSet<String>) -> Result<()> {
+        let managed_file = store_root.parent().unwrap_or(store_root).join(MANAGED_USERS_FILE);
+        let content = serde_json::to_string(&users.iter().cloned().collect::<Vec<_>>())?;
+        fs::write(managed_file, content)?;
+        Ok(())
+    }
+
+    fn mark_user_managed(store_root: &Path, username: &str) -> Result<()> {
+        if username == "root" {
+            return Ok(());
+        }
+        let mut managed = Self::load_managed_users(store_root);
+        managed.insert(username.to_string());
+        Self::save_managed_users(store_root, &managed)?;
+        Ok(())
+    }
+
+    fn is_managed_user(username: &str, managed_users: &HashSet<String>) -> bool {
+        managed_users.contains(username)
+    }
+
+    fn get_system_users() -> Result<Vec<String>> {
+        let output = Command::new("awk")
+            .args(["-F:", "{print $1}", "/etc/passwd"])
+            .output()?;
+        let users: Vec<String> = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(|s| s.to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        Ok(users)
+    }
+
+    fn remove_undeclared_users(
+        config_users: &HashMap<String, UserConfig>,
+        managed_users: &HashSet<String>,
+        store_root: &Path,
+    ) -> Result<()> {
+        let system_users = Self::get_system_users()?;
+        let config_usernames: HashSet<&String> = config_users.keys().collect();
+
+        for username in system_users {
+            if !Self::is_managed_user(&username, managed_users) {
+                continue;
+            }
+
+            if !config_usernames.contains(&username) {
+                println!("Removing undeclared user: {}", username);
+                let status = Command::new("userdel").arg("-r").arg(&username).status()?;
+
+                if !status.success() {
+                    eprintln!("Warning: failed to remove user {}", username);
+                } else {
+                    let mut managed = managed_users.clone();
+                    managed.remove(&username);
+                    Self::save_managed_users(store_root, &managed)?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn get_system_groups() -> Result<Vec<String>> {
+        let output = Command::new("awk")
+            .args(["-F:", "{print $1}", "/etc/group"])
+            .output()?;
+        let groups: Vec<String> = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(|s| s.to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        Ok(groups)
+    }
+
+    fn remove_undeclared_groups(
+        config_users: &HashMap<String, UserConfig>,
+        managed_groups: &HashSet<String>,
+        store_root: &Path,
+    ) -> Result<()> {
+        let mut declared_groups: HashSet<String> = HashSet::new();
+        for config in config_users.values() {
+            for group in &config.groups {
+                declared_groups.insert(group.clone());
+            }
+        }
+
+        let system_groups = Self::get_system_groups()?;
+
+        for group in system_groups {
+            if !Self::is_managed_group(&group, managed_groups) {
+                continue;
+            }
+
+            if !declared_groups.contains(&group) {
+                let output = Command::new("getent").arg("group").arg(&group).output()?;
+                let has_members = String::from_utf8_lossy(&output.stdout).contains(":");
+
+                if has_members {
+                    let members = Command::new("getent")
+                        .args(["group", &group])
+                        .output()?
+                        .stdout;
+                    let members_str = String::from_utf8_lossy(&members);
+                    if members_str.contains(':') {
+                        let parts: Vec<&str> = members_str.split(':').collect();
+                        if parts.len() >= 4 {
+                            let member_list = parts[3];
+                            if !member_list.is_empty() {
+                                println!("Skipping group {} (has members: {})", group, member_list);
+                                continue;
+                            }
+                        }
+                    }
+                }
+
+                println!("Removing undeclared group: {}", group);
+                let status = Command::new("groupdel").arg(&group).status()?;
+
+                if !status.success() {
+                    eprintln!("Warning: failed to remove group {}", group);
+                } else {
+                    let mut managed = managed_groups.clone();
+                    managed.remove(&group);
+                    Self::save_managed_groups(store_root, &managed)?;
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -186,8 +378,12 @@ impl UserApplier {
         Ok(())
     }
 
-    fn ensure_groups(name: &str, groups: &[String]) -> Result<()> {
-        for group in groups {
+    fn ensure_groups(name: &str, config_groups: &[String]) -> Result<()> {
+        let default_groups = [
+            "root", "wheel", "sudo", "adm", "audio", "video", "disk", "lp", "tty",
+        ];
+
+        for group in config_groups {
             let group_exists = Command::new("getent")
                 .arg("group")
                 .arg(group)
@@ -213,6 +409,31 @@ impl UserApplier {
                 println!("Added {} to group: {}", name, group);
             }
         }
+
+        let output = Command::new("id").arg("-nG").arg(name).output()?;
+        let current_groups_str = String::from_utf8_lossy(&output.stdout);
+        let current_groups: Vec<&str> = current_groups_str.split_whitespace().collect();
+
+        for group in current_groups {
+            if default_groups.contains(&group) {
+                continue;
+            }
+
+            if group == name {
+                continue;
+            }
+
+            if !config_groups.iter().any(|g| g.as_str() == group) {
+                Command::new("gpasswd")
+                    .arg("-d")
+                    .arg(name)
+                    .arg(group)
+                    .status()
+                    .ok();
+                println!("Removed {} from group: {}", name, group);
+            }
+        }
+
         Ok(())
     }
 

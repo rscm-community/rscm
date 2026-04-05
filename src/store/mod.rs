@@ -451,7 +451,11 @@ impl Store {
             let users_content = fs::read_to_string(&users_config_path)?;
             let users: std::collections::HashMap<String, crate::config::UserConfig> =
                 toml::from_str(&users_content)?;
-            UserApplier::apply(&users)?;
+            let store_root = gen_path
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| gen_path.to_path_buf());
+            UserApplier::apply(&users, &store_root)?;
         }
 
         let boot_config_path = gen_path.join("boot_config.toml");
