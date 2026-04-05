@@ -650,11 +650,16 @@ impl<'a> LuaEngine {
             user.uid = value.get::<u32>("uid").ok();
             user.groups = value.get::<Vec<String>>("groups").unwrap_or_default();
             user.ssh_keys = value.get::<Vec<String>>("ssh_keys").unwrap_or_default();
-            user.system_user = value.get::<bool>("system_user").unwrap_or(false);
+            user.system_user = value
+                .get::<bool>("system_user")
+                .unwrap_or(UserConfig::default().system_user);
             user.shell = value.get::<String>("shell").ok();
             user.home = value.get::<String>("home").ok();
-            user.create_home = value.get::<bool>("create_home").unwrap_or(false);
+            user.create_home = value
+                .get::<bool>("create_home")
+                .unwrap_or(UserConfig::default().create_home);
             user.description = value.get::<String>("description").ok();
+            user.password = value.get::<String>("password").ok();
             if let Ok(dotfiles_table) = value.get::<Table>("dotfiles") {
                 let mut dotfiles = DotfilesConfig::default();
                 dotfiles.source = dotfiles_table.get::<String>("source").ok();
