@@ -1,16 +1,84 @@
 use anyhow::Result;
-use std::collections::HashMap;
+use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::config::ServiceConfig;
+
+const MANAGED_SERVICES_PATH: &str = "/etc/rscm/managed_services.toml";
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DeclaredServices {
+    pub services: Vec<String>,
+}
+
+pub struct ServiceTracker {
+    path: PathBuf,
+}
+
+impl ServiceTracker {
+    pub fn new() -> Self {
+        Self {
+            path: PathBuf::from(MANAGED_SERVICES_PATH),
+        }
+    }
+
+    pub fn load(&self) -> DeclaredServices {
+        if self.path.exists() {
+            if let Ok(content) = fs::read_to_string(&self.path) {
+                if let Ok(services) = toml::from_str(&content) {
+                    return services;
+                }
+            }
+        }
+        DeclaredServices::default()
+    }
+
+    pub fn save(&self, services: &DeclaredServices) -> Result<()> {
+        if let Some(parent) = self.path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let content = toml::to_string_pretty(services)?;
+        fs::write(&self.path, content)?;
+        Ok(())
+    }
+
+    pub fn compute_removed(
+        &self,
+        current_services: &HashMap<String, ServiceConfig>,
+    ) -> Vec<String> {
+        let declared = self.load();
+        let declared_set: HashSet<&str> = declared.services.iter().map(|s| s.as_str()).collect();
+        let current_set: HashSet<&str> = current_services.keys().map(|s| s.as_str()).collect();
+
+        declared_set
+            .difference(&current_set)
+            .map(|s| s.to_string())
+            .collect()
+    }
+
+    pub fn update_declared(&self, current_services: &HashMap<String, ServiceConfig>) -> Result<()> {
+        let mut names: Vec<String> = current_services.keys().cloned().collect();
+        names.sort();
+        self.save(&DeclaredServices { services: names })
+    }
+}
 
 pub struct ServiceApplier;
 
 impl ServiceApplier {
     pub fn apply(services: &HashMap<String, ServiceConfig>) -> Result<()> {
+        let tracker = ServiceTracker::new();
+        let removed = tracker.compute_removed(services);
+
         let mut needs_daemon_reload = false;
+
+        for name in &removed {
+            Self::stop_and_disable_removed(name)?;
+            needs_daemon_reload = true;
+        }
 
         for (name, config) in services {
             if config.enable {
@@ -21,9 +89,45 @@ impl ServiceApplier {
             }
         }
 
+        tracker.update_declared(services)?;
+
         if needs_daemon_reload {
             Command::new("systemctl").arg("daemon-reload").status().ok();
         }
+
+        Ok(())
+    }
+
+    fn stop_and_disable_removed(name: &str) -> Result<()> {
+        let service_name = if name.ends_with(".service") {
+            name.to_string()
+        } else {
+            format!("{}.service", name)
+        };
+
+        Command::new("systemctl")
+            .arg("stop")
+            .arg(&service_name)
+            .status()
+            .ok();
+
+        Command::new("systemctl")
+            .arg("disable")
+            .arg(&service_name)
+            .status()
+            .ok();
+
+        let drop_in_dir = Path::new("/etc/systemd/system").join(format!("{}.service.d", name));
+        if drop_in_dir.exists() {
+            let _ = fs::remove_dir_all(&drop_in_dir);
+        }
+
+        let etc_config = Path::new("/etc").join(name);
+        if etc_config.exists() {
+            let _ = fs::remove_dir_all(&etc_config);
+        }
+
+        println!("Removed managed service: {}", name);
 
         Ok(())
     }
