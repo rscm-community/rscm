@@ -386,6 +386,8 @@ pub struct UserConfig {
     pub create_home: bool,
     #[serde(default)]
     pub description: Option<String>,
+    #[serde(default)]
+    pub password: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -467,8 +469,9 @@ impl Default for UserConfig {
             dotfiles: None,
             shell: None,
             home: None,
-            create_home: false,
+            create_home: true,
             description: None,
+            password: None,
         }
     }
 }

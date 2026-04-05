@@ -1,12 +1,43 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
+use which::which;
 
 use crate::config::UserConfig;
+use crate::pkg::pacman::Pacman;
+use crate::pkg::{BuildType, PackageConfig, PackageManager};
 
 pub struct UserApplier;
+
+fn ensure_openssl() -> Result<()> {
+    if which("openssl").is_ok() {
+        return Ok(());
+    }
+
+    println!("openssl not found, installing temporarily...");
+
+    let temp_store_root = std::env::temp_dir().join("rscm-temp-openssl");
+    let pacman = Pacman::system(temp_store_root);
+
+    let config = PackageConfig {
+        name: "openssl".to_string(),
+        version: None,
+        build_type: BuildType::Pacman,
+        dependencies: vec![],
+        sandbox_config: None,
+    };
+
+    pacman.install(&config, false)?;
+
+    if which("openssl").is_err() {
+        return Err(anyhow::anyhow!("Failed to install openssl"));
+    }
+
+    println!("openssl installed successfully");
+    Ok(())
+}
 
 impl UserApplier {
     pub fn apply(users: &HashMap<String, UserConfig>) -> Result<()> {
@@ -70,6 +101,19 @@ impl UserApplier {
             cmd.arg("--shell").arg(shell);
         }
 
+        if let Some(ref password) = config.password {
+            ensure_openssl()?;
+            let password_hash = if password.starts_with('$') {
+                password.clone()
+            } else {
+                let output = Command::new("openssl")
+                    .args(["passwd", "-6", password])
+                    .output()?;
+                String::from_utf8_lossy(&output.stdout).trim().to_string()
+            };
+            cmd.arg("--password").arg(password_hash);
+        }
+
         cmd.arg(name);
 
         let status = cmd.status()?;
@@ -85,26 +129,51 @@ impl UserApplier {
     fn update_user(name: &str, config: &UserConfig, home_dir: &str) -> Result<()> {
         let mut cmd = Command::new("usermod");
 
+        let mut has_option = false;
+
         if let Some(ref shell) = config.shell {
             cmd.arg("--shell").arg(shell);
+            has_option = true;
         }
 
         if let Some(ref desc) = config.description {
             cmd.arg("--comment").arg(desc);
+            has_option = true;
         }
 
         if let Some(uid) = config.uid {
             cmd.arg("--uid").arg(uid.to_string());
+            has_option = true;
         }
 
         if config.home.is_some() {
             cmd.arg("--home").arg(home_dir);
+            has_option = true;
         }
 
         if !config.groups.is_empty() {
             cmd.arg("--append")
                 .arg("--groups")
                 .arg(config.groups.join(","));
+            has_option = true;
+        }
+
+        if let Some(ref password) = config.password {
+            ensure_openssl()?;
+            let password_hash = if password.starts_with('$') {
+                password.clone()
+            } else {
+                let output = Command::new("openssl")
+                    .args(["passwd", "-6", password])
+                    .output()?;
+                String::from_utf8_lossy(&output.stdout).trim().to_string()
+            };
+            cmd.arg("--password").arg(password_hash);
+            has_option = true;
+        }
+
+        if !has_option {
+            return Ok(());
         }
 
         cmd.arg(name);
