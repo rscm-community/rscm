@@ -104,7 +104,7 @@ GENERATION=$(cat /proc/cmdline | tr ' ' '\n' | grep '^rscm.generation=' | cut -d
 if [ -n "$GENERATION" ]; then
     CURRENT=$(readlink -f /rscm/current-system 2>/dev/null | xargs basename 2>/dev/null)
     if [ "$CURRENT" != "$GENERATION" ]; then
-        /usr/bin/rscm switch "$GENERATION"
+        rscm switch "$GENERATION"
     fi
 fi
 "#;
