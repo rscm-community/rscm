@@ -32,6 +32,7 @@ A declarative system configuration manager designed for **Arch Linux** and its d
 ### Installation
 
 From source:
+
 ```bash
 # Build from source
 git clone https://github.com/rscm-community/rscm.git
@@ -43,8 +44,9 @@ sudo install -m 755 target/release/rscm /usr/bin/rscm
 ```
 
 or use aur helper like `yay`:
+
 ```bash
-yay -S rscm-git
+yay -S rscm-bin
 ```
 
 ### Initialize
