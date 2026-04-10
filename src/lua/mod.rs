@@ -811,6 +811,7 @@ impl<'a> LuaEngine {
 
         config.dev_shm_size = section.get::<String>("devShmSize").ok();
         config.grow_partition = section.get::<bool>("growPartition").ok();
+        config.root_device = section.get::<String>("rootDevice").ok();
 
         Ok(config)
     }

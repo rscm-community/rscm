@@ -197,6 +197,9 @@ impl Configuration {
                     if other_boot.grow_partition.is_some() {
                         self_boot.grow_partition = other_boot.grow_partition;
                     }
+                    if other_boot.root_device.is_some() {
+                        self_boot.root_device = other_boot.root_device;
+                    }
                 }
             } else {
                 self.boot = other.boot;
@@ -505,6 +508,7 @@ pub struct BootConfig {
     pub console_log_level: Option<u32>,
     pub dev_shm_size: Option<String>,
     pub grow_partition: Option<bool>,
+    pub root_device: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

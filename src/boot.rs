@@ -431,9 +431,12 @@ fi
             }
         }
 
-        let root_device = Self::get_root_device();
-        if let Some(ref root) = root_device {
-            options.push(root.clone());
+        let has_root_param = options.iter().any(|p| p.starts_with("root="));
+        if !has_root_param {
+            let root_device = Self::get_root_device(boot_config);
+            if let Some(ref root) = root_device {
+                options.push(root.clone());
+            }
         }
 
         if let Some(ref initrd) = boot_config.initrd {
@@ -504,7 +507,51 @@ fi
             .map(|s| s.trim().to_string())
     }
 
-    fn get_root_device() -> Option<String> {
+    fn get_root_device(boot_config: &BootConfig) -> Option<String> {
+        if let Some(ref root_device) = boot_config.root_device {
+            return Some(root_device.clone());
+        }
+
+        Self::get_root_from_fstab().or_else(|| Self::get_root_from_cmdline())
+    }
+
+    fn get_root_from_fstab() -> Option<String> {
+        let fstab_content = fs::read_to_string("/etc/fstab").ok()?;
+
+        for line in fstab_content.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            if fields.len() >= 2 {
+                let mount_point = fields[1];
+                if mount_point == "/" || mount_point == "root" {
+                    let device = fields[0];
+                    if !device.starts_with("UUID=")
+                        && !device.starts_with("LABEL=")
+                        && !device.starts_with("/dev/")
+                    {
+                        return Some(format!("root={}", device));
+                    }
+
+                    if device.starts_with("UUID=") {
+                        let uuid = device.trim_start_matches("UUID=");
+                        return Some(format!("root=UUID={}", uuid));
+                    }
+                    if device.starts_with("LABEL=") {
+                        let label = device.trim_start_matches("LABEL=");
+                        return Some(format!("root=LABEL={}", label));
+                    }
+                    return Some(format!("root={}", device));
+                }
+            }
+        }
+        None
+    }
+
+    fn get_root_from_cmdline() -> Option<String> {
         fs::read_to_string("/proc/cmdline")
             .ok()
             .and_then(|cmdline| {
