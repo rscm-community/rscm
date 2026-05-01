@@ -10,7 +10,7 @@ license = "MIT"
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
-mlua = { version = "0.11.6", features = ["lua54", "error-send", "serde"] }
+mlua = { version = "0.11.6", features = ["lua54", "error-send", "serde", "vendored"] }
 serde = { version = "1", features = ["derive"] }
 which = "8.0.2"
 libc = "0.2.183"
@@ -23,10 +23,7 @@ toml = "1"
 dirs = "6"
 fs2 = "0.4"
 chrono = { version = "0.4", features = ["serde"] }
-reqwest = { version = "0.13.2", default-features = false, features = [
-    "blocking",
-    "native-tls",
-] }
+reqwest = { version = "0.13.2", features = ["blocking"] }
 tar = "0.4.45"
 xz2 = "0.1.7"
 zstd = "0.13.3"
