@@ -1507,7 +1507,7 @@ impl PackageManager for AurHelper {
 
         if let Some(ref script) = install_script {
             if script.functions.iter().any(|f| f == "post_install") {
-                if let Err(e) = execute_post_install(&script, &info.name, &info.version) {
+                if let Err(e) = execute_post_install(&script, &info.name, &info.version, Some(&store_pkg_dir)) {
                     eprintln!("Warning: post_install hook failed: {}", e);
                 }
             }

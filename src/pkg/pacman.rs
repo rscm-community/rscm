@@ -1014,12 +1014,36 @@ impl Pacman {
 
         self.package_store.save(&pkg)?;
 
+        let pkg_dir_name = format!("{}-{}-{}", name, ver, rel);
+        let pkg_store_path = self.package_store.root().join(&pkg_dir_name);
+        fs::create_dir_all(&pkg_store_path)?;
+
+        for file in &pkg.files {
+            let dest_path = pkg_store_path.join(&file.path);
+            if let Some(parent) = dest_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            if let Some(ref source_path_str) = file.source_path {
+                let source_path = std::path::Path::new(source_path_str);
+                if let Some(target) = file.symlink_target.as_ref() {
+                    if let Some(parent) = dest_path.parent() {
+                        fs::create_dir_all(parent)?;
+                    }
+                    std::os::unix::fs::symlink(target, &dest_path)?;
+                } else {
+                    fs::copy(source_path, &dest_path)?;
+                }
+            }
+        }
+
         if let Some(ref script) = install_script {
             if script.functions.iter().any(|f| f == "post_install") {
                 let is_kernel =
                     name == "linux" || name.starts_with("linux-") || name.starts_with("linux_");
                 if !is_kernel {
-                    execute_post_install(script, name, &ver)?;
+                    if let Err(e) = execute_post_install(script, name, &ver, Some(&pkg_store_path)) {
+                        eprintln!("Warning: post_install hook for {}-{} failed: {}", name, ver, e);
+                    }
                 } else {
                     println!(
                         "Skipping post_install hook for kernel package: {} (managed by rscm boot)",

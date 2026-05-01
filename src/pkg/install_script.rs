@@ -91,6 +91,7 @@ pub fn execute_install_hook(
     hook_type: InstallHookType,
     pkg_name: &str,
     pkg_version: &str,
+    pkg_install_dir: Option<&Path>,
 ) -> Result<()> {
     let func_name = hook_type.function_name();
 
@@ -103,14 +104,29 @@ pub fn execute_install_hook(
         func_name, pkg_name, pkg_version
     );
 
-    let script_content = format!(
-        "pkgname='{}'\npkgver='{}'\n\n{}\n\n{} $@\n",
-        pkg_name, pkg_version, script.content, func_name
+    let mut script_content = format!(
+        "pkgname='{}'\npkgver='{}'\n\n{}\n\n",
+        pkg_name, pkg_version, script.content
     );
+
+    if let Some(dir) = pkg_install_dir {
+        // 设置 pkgdir 为包安装目录，这样 .INSTALL 脚本中的相对路径（如 etc/shells）
+        // 会正确解析到包的安装目录
+        script_content.push_str(&format!(
+            "export PKGDEST='{}'\nexport pkgdir='{}'\ncd '{}'\n\n{} $@\n",
+            dir.display(),
+            dir.display(),
+            dir.display(),
+            func_name
+        ));
+    } else {
+        script_content.push_str(&format!("{} $@\n", func_name));
+    }
 
     let output = Command::new("bash")
         .arg("-c")
         .arg(&script_content)
+        .current_dir("/")
         .output()
         .context(format!("Failed to execute {} hook", func_name))?;
 
@@ -138,14 +154,16 @@ pub fn execute_post_install(
     script: &InstallScript,
     pkg_name: &str,
     pkg_version: &str,
+    pkg_install_dir: Option<&Path>,
 ) -> Result<()> {
-    execute_install_hook(script, InstallHookType::PostInstall, pkg_name, pkg_version)
+    execute_install_hook(script, InstallHookType::PostInstall, pkg_name, pkg_version, pkg_install_dir)
 }
 
 pub fn execute_pre_install(
     script: &InstallScript,
     pkg_name: &str,
     pkg_version: &str,
+    pkg_install_dir: Option<&Path>,
 ) -> Result<()> {
-    execute_install_hook(script, InstallHookType::PreInstall, pkg_name, pkg_version)
+    execute_install_hook(script, InstallHookType::PreInstall, pkg_name, pkg_version, pkg_install_dir)
 }

@@ -61,8 +61,57 @@ pub enum Commands {
         #[command(subcommand)]
         action: GenerationsAction,
     },
-    #[command(about = "Start a shell session")]
-    Shell,
+    #[command(about = "Start a shell session with packages in PATH")]
+    Shell {
+        #[arg(
+            long,
+            short,
+            value_delimiter = ',',
+            help = "Packages to add (comma-separated or multiple -p)"
+        )]
+        packages: Vec<String>,
+        #[arg(
+            long,
+            short = 'C',
+            help = "Path to shell config file (default: ./rscm-shell.lua, then ~/.config/rscm/, /etc/rscm/)"
+        )]
+        config: Option<String>,
+        #[arg(
+            long,
+            short = 'n',
+            help = "Name of shell environment to use (from configuration.lua shells {} section)"
+        )]
+        shell_name: Option<String>,
+        #[arg(
+            long,
+            short = 'l',
+            help = "List all available shell environments"
+        )]
+        list: bool,
+        #[arg(
+            long,
+            short = 'V',
+            value_name = "KEY=VALUE",
+            help = "Variable passed to the config file (usable via os.getenv or as Lua global)"
+        )]
+        vars: Vec<String>,
+        #[arg(
+            long,
+            help = "Use pure environment (do not inherit host environment variables)"
+        )]
+        pure: bool,
+        #[arg(
+            long,
+            short,
+            help = "Run a command instead of an interactive shell"
+        )]
+        command: Option<String>,
+        #[arg(
+            last = true,
+            help = "Arguments forwarded to the shell (e.g. -- --login)"
+        )]
+        shell_args: Vec<String>,
+    },
     #[command(about = "Lock the configuration")]
     Lock {
         #[arg(long, short, help = "Update existing lock file")]
@@ -574,7 +623,22 @@ pub fn run(cli: Cli) -> Result<()> {
                 }
             }
         }
-        Commands::Shell => todo!(),
+        Commands::Shell { packages, config, shell_name, list, vars, pure, command, shell_args } => {
+            if list {
+                crate::shell::list_shell_environments()?;
+            } else {
+                crate::shell::enter_shell(
+                    &packages,
+                    config.as_deref(),
+                    shell_name.as_deref(),
+                    &vars,
+                    pure,
+                    command.as_deref(),
+                    &shell_args,
+                )?;
+            }
+            Ok(())
+        }
         Commands::Lock {
             update,
             force,
@@ -774,6 +838,8 @@ pub fn run(cli: Cli) -> Result<()> {
             }
 
             let result = store.gc(dry_run)?;
+            let shells_cleaned = store.gc_shell_envs()?;
+            
             if dry_run {
                 println!("Dry run - would collect:");
             } else {
@@ -781,6 +847,7 @@ pub fn run(cli: Cli) -> Result<()> {
             }
             println!("  {} content files", result.collected_contents);
             println!("  {} packages", result.collected_packages);
+            println!("  {} orphaned shell environments", shells_cleaned);
             println!("  freed: {}", CacheManager::format_size(result.freed_space));
             Ok(())
         }

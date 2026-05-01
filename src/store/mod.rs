@@ -2,11 +2,13 @@ pub mod content;
 pub mod generation;
 pub mod package;
 pub mod reference;
+pub mod shell;
 
 pub use content::ContentStore;
 pub use generation::{Generation, GenerationStore};
 pub use package::{FileEntry, Package, PackageStore};
 pub use reference::{RefKind, ReferenceCounter};
+pub use shell::ShellEnvStore;
 
 use anyhow::Result;
 use std::collections::HashSet;
@@ -36,6 +38,7 @@ pub struct Store {
     generations: GenerationStore,
     reference: ReferenceCounter,
     pkg_factory: PackageManagerFactory,
+    shell_envs: ShellEnvStore,
 }
 
 impl Store {
@@ -51,6 +54,7 @@ impl Store {
         let generations = GenerationStore::new(root.join("generations"))?;
         let reference = ReferenceCounter::new(root.join("references.json"))?;
         let pkg_factory = PackageManagerFactory::new(root.clone());
+        let shell_envs = ShellEnvStore::new(root.join("shells"))?;
 
         Ok(Self {
             root,
@@ -59,6 +63,7 @@ impl Store {
             generations,
             reference,
             pkg_factory,
+            shell_envs,
         })
     }
     pub fn register_package(&mut self, pkg: Package) -> Result<()> {
@@ -737,5 +742,52 @@ impl Store {
             }
         }
         Ok(())
+    }
+
+    pub fn create_shell_env(&self, packages: &[String]) -> Result<crate::store::shell::ShellEnv> {
+        self.shell_envs.create(packages)
+    }
+
+    pub fn delete_shell_env(&self, id: u64) -> Result<()> {
+        self.shell_envs.delete(id)
+    }
+
+    pub fn list_shell_envs(&self) -> Result<Vec<crate::store::shell::ShellEnv>> {
+        self.shell_envs.list()
+    }
+
+    pub fn shell_env_path(&self, id: u64) -> PathBuf {
+        self.shell_envs.path(id)
+    }
+
+    pub fn gc_shell_envs(&self) -> Result<usize> {
+        let mut deleted = 0;
+        for shell in self.shell_envs.list()? {
+            if !shell.path.exists() {
+                continue;
+            }
+            
+            let pid_file = shell.path.join("pid");
+            if pid_file.exists() {
+                if let Ok(pid_str) = fs::read_to_string(&pid_file) {
+                    if let Ok(pid) = pid_str.trim().parse::<u32>() {
+                        let output = std::process::Command::new("ps")
+                            .arg("-p")
+                            .arg(pid.to_string())
+                            .output();
+                        if let Ok(out) = output {
+                            if out.status.success() {
+                                continue;
+                            }
+                        }
+                    }
+                }
+            }
+            
+            println!("Cleaning up orphaned shell env: {}", shell.id);
+            self.shell_envs.delete(shell.id)?;
+            deleted += 1;
+        }
+        Ok(deleted)
     }
 }

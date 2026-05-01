@@ -256,6 +256,10 @@ impl<'a> LuaEngine {
             config.environment = self.parse_environment(environment_section)?;
         }
 
+        if let Ok(shells_section) = root.get::<Table>("shells") {
+            config.shells = self.parse_shells(shells_section)?;
+        }
+
         if let Ok(plugins_section) = root.get::<Table>("plugins") {
             config.plugins = self.parse_plugins(plugins_section)?;
         }
@@ -1244,6 +1248,42 @@ impl<'a> LuaEngine {
         config.paths_to_link = section.get::<Vec<String>>("pathsToLink").ok();
 
         Ok(config)
+    }
+
+    pub fn parse_shells(
+        &self,
+        section: Table,
+    ) -> Result<HashMap<String, crate::config::ShellEnvironmentConfig>> {
+        let mut shells = HashMap::new();
+
+        for pair in section.pairs::<String, Table>() {
+            let (name, shell_table) = pair?;
+            let mut shell_config = crate::config::ShellEnvironmentConfig::default();
+
+            shell_config.description = shell_table.get::<String>("description").ok();
+            shell_config.packages = shell_table.get::<Vec<String>>("packages").unwrap_or_default();
+            shell_config.default = shell_table.get::<bool>("default").unwrap_or(false);
+
+            // 支持 shellHook 和 shell_hook 两种写法
+            let shell_hook = shell_table
+                .get::<String>("shellHook")
+                .ok()
+                .or_else(|| shell_table.get::<String>("shell_hook").ok());
+            shell_config.shell_hook = shell_hook;
+
+            if let Ok(vars_table) = shell_table.get::<Table>("variables") {
+                let mut variables = HashMap::new();
+                for pair in vars_table.pairs::<String, String>() {
+                    let (k, v) = pair?;
+                    variables.insert(k, v);
+                }
+                shell_config.variables = variables;
+            }
+
+            shells.insert(name, shell_config);
+        }
+
+        Ok(shells)
     }
 
     pub fn parse_plugins(

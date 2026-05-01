@@ -6,6 +6,7 @@ pub mod lock;
 pub mod lua;
 pub mod pkg;
 pub mod service;
+pub mod shell;
 pub mod store;
 pub mod system_config;
 pub mod toolchain;

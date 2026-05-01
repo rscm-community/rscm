@@ -76,6 +76,9 @@ pub struct Configuration {
     pub environment: EnvironmentConfig,
 
     #[serde(default)]
+    pub shells: HashMap<String, ShellEnvironmentConfig>,
+
+    #[serde(default)]
     pub plugins: HashMap<String, PluginConfig>,
 
     #[serde(default)]
@@ -296,6 +299,10 @@ impl Configuration {
             } else {
                 self.environment.paths_to_link = other.environment.paths_to_link;
             }
+        }
+
+        for (k, v) in other.shells {
+            self.shells.entry(k).or_insert(v);
         }
 
         for (k, v) in other.plugins {
@@ -687,6 +694,18 @@ pub struct EnvironmentConfig {
     pub shell_init: Option<String>,
     pub login_shell_init: Option<String>,
     pub paths_to_link: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ShellEnvironmentConfig {
+    pub description: Option<String>,
+    #[serde(default)]
+    pub packages: Vec<String>,
+    pub shell_hook: Option<String>,
+    #[serde(default)]
+    pub variables: HashMap<String, String>,
+    #[serde(default)]
+    pub default: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
